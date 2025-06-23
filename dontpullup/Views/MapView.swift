@@ -2,6 +2,8 @@ import SwiftUI
 import MapKit
 import AVKit
 import FirebaseAuth
+import AVFoundation
+import FirebaseFirestore
 
 // Update the constants to be more specific and avoid naming conflicts
 private enum MapViewConstants {
@@ -34,6 +36,9 @@ class PinAnnotation: MKPointAnnotation {
 
 struct MapView: UIViewRepresentable {
     @ObservedObject var viewModel: MapViewModel
+    @Binding var region: MKCoordinateRegion
+    @Binding var showingReportVideo: Bool
+    @Binding var currentVideoPlayer: AVPlayerViewController?
     
     func makeUIView(context: Context) -> MKMapView {
         // Disable debug overlays using safer method
@@ -301,17 +306,8 @@ class Coordinator: NSObject, MKMapViewDelegate {
             return
         }
         
-        // Check if location is within range (200 feet)
-        Task { @MainActor in
-            let isWithinRange = await parent.viewModel.isWithinPinDropRange(coordinate: validCoordinate)
-            if isWithinRange {
-                // Set the pending coordinate and show the incident picker directly
-                parent.viewModel.pendingCoordinate = validCoordinate
-                parent.viewModel.showingIncidentPicker = true
-            } else {
-                parent.viewModel.showError("You can only drop pins within 200 feet of your location")
-            }
-        }
+        // Use the unified location handler for pin drop
+        parent.viewModel.handleLocationAction(.pinDrop(validCoordinate))
     }
     
     // Implement MKMapViewDelegate methods to prevent unwanted zoom changes
@@ -356,7 +352,7 @@ class Coordinator: NSObject, MKMapViewDelegate {
             return view
         }
         
-        if let pinAnnotation = annotation as? PinAnnotation {
+        if let pinAnnotation = annotation as? PinAnnotation else {
             let identifier = "PinAnnotation"
             var annotationView = mapView.dequeueReusableAnnotationView(withIdentifier: identifier) as? MKMarkerAnnotationView
             
@@ -441,66 +437,49 @@ class Coordinator: NSObject, MKMapViewDelegate {
             return
         }
         
-        // Play video logic refactored
+        // Set current video ID for flagging reference
+        parent.viewModel.currentlyPlayingVideoId = pin.id
+        
+        // Use the new refresh mechanism to handle video playback
         Task { @MainActor in
-            // Set current video ID for flagging reference
-            parent.viewModel.currentlyPlayingVideoId = pin.id
-            var videoURLToPlay: URL? = nil
-            var isLoadingIndicatorPresented = false
-            var loadingAlert: UIAlertController? = nil
-
             do {
-                // Ensure existing player is fully dismissed
-                await dismissExistingPlayer(animated: true)
-                
-                // Show loading indicator
-                loadingAlert = UIAlertController(title: "Loading Video", message: "Please wait...", preferredStyle: .alert)
-                guard let rootVC = getRootViewController() else {
-                    throw NSError(domain: "VideoPlayback", code: -5, userInfo: [NSLocalizedDescriptionKey: "Could not get root view controller."])
-                }
-                
-                // Present loading alert
-                rootVC.present(loadingAlert!, animated: true)
-                isLoadingIndicatorPresented = true
-
-                // Get video URL
+                // First check if we need to refresh the pin data
                 if pin.videoURL.isEmpty {
-                    throw NSError(domain: "VideoPlayback", code: -1, userInfo: [NSLocalizedDescriptionKey: "No video URL available."])
-                }
-                
-                // Try to get from cache or URL
-                if let cachedData = parent.viewModel.getCachedVideo(for: pin.videoURL), !cachedData.isEmpty {
-                    print("Playing video from cache...")
-                    videoURLToPlay = try createTemporaryFile(from: cachedData)
-                } else if let remoteURL = URL(string: pin.videoURL) { 
-                    // If URL is valid, play directly from it
-                    print("Playing directly from URL...")
-                    videoURLToPlay = remoteURL
+                    print("[MapView] Pin has empty videoURL, attempting to refresh from Firestore")
+                    if let refreshedPin = try await refreshPinFromFirestore(pinId: pin.id), 
+                       !refreshedPin.videoURL.isEmpty {
+                        // Update pin in viewModel to have the correct URL for future references
+                        parent.viewModel.updatePinVideoURL(pin.id, newURL: refreshedPin.videoURL)
+                        
+                        // Play the video with the refreshed URL
+                        print("[MapView] Successfully refreshed pin with video URL: \(refreshedPin.videoURL)")
+                        await dismissExistingPlayer(animated: true)
+                        if let url = URL(string: refreshedPin.videoURL) {
+                            await playVideo(from: url)
+                        } else {
+                            throw NSError(domain: "VideoPlayback", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid video URL format after refresh."])
+                        }
+                    } else {
+                        // Check if this pin is currently uploading
+                        if parent.viewModel.uploadProgress > 0 && parent.viewModel.uploadProgress < 1.0 {
+                            throw NSError(domain: "VideoPlayback", code: -2, userInfo: [NSLocalizedDescriptionKey: "Video is still uploading. Please wait for upload to complete."])
+                        } else {
+                            throw NSError(domain: "VideoPlayback", code: -1, userInfo: [NSLocalizedDescriptionKey: "This pin has no video attached."])
+                        }
+                    }
                 } else {
-                    throw NSError(domain: "VideoPlayback", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid video URL."])
+                    // We already have a video URL, proceed with normal playback
+                    print("[MapView] Pin already has videoURL: \(pin.videoURL)")
+                    await dismissExistingPlayer(animated: true)
+                    if let url = URL(string: pin.videoURL) {
+                        await playVideo(from: url)
+                    } else {
+                        throw NSError(domain: "VideoPlayback", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid video URL format."])
+                    }
                 }
-
-                // Dismiss loading indicator
-                if isLoadingIndicatorPresented {
-                    await dismissViewController(loadingAlert, animated: true)
-                    isLoadingIndicatorPresented = false
-                    loadingAlert = nil
-                }
-
-                // Play the video
-                if let url = videoURLToPlay {
-                    await playVideo(from: url) 
-                } else {
-                    throw NSError(domain: "VideoPlayback", code: -3, userInfo: [NSLocalizedDescriptionKey: "Could not obtain a valid URL to play."])
-                }
-
-            } catch { 
+            } catch {
                 print("Error during video playback: \(error)")
-                // Ensure loading indicator is dismissed
-                if isLoadingIndicatorPresented, let alertToDismiss = loadingAlert {
-                    await dismissViewController(alertToDismiss, animated: true)
-                }
-                parent.viewModel.showError("Failed to play video: \(error.localizedDescription)") 
+                parent.viewModel.showError("Failed to play video: \(error.localizedDescription)")
             }
         }
     }
@@ -654,130 +633,77 @@ class Coordinator: NSObject, MKMapViewDelegate {
         // Pause video
         playerVC.player?.pause()
         
-        // Create alert with text field and reason picker
-        let alert = UIAlertController(title: "Report Video", message: "Please provide your email and select a reason for reporting", preferredStyle: .alert)
-        
-        // Add email field
-        alert.addTextField { textField in
-            textField.placeholder = "Your email address"
-            textField.keyboardType = .emailAddress
-            textField.autocapitalizationType = .none
-            
-            // Fix input assistant view issue by disabling the input assistant
-            textField.inputAssistantItem.leadingBarButtonGroups = []
-            textField.inputAssistantItem.trailingBarButtonGroups = []
+        // Store the player reference and show SwiftUI report view
+        parent.currentVideoPlayer = playerVC
+        parent.showingReportVideo = true
+    }
+}
+
+// Wrapper view to handle the report video sheet
+struct MapViewWithReportSheet: View {
+    @ObservedObject var viewModel: MapViewModel
+    @Binding var region: MKCoordinateRegion
+    @State private var showingReportVideo = false
+    @State private var currentVideoPlayer: AVPlayerViewController?
+    
+    var body: some View {
+        MapView(
+            viewModel: viewModel,
+            region: $region,
+            showingReportVideo: $showingReportVideo,
+            currentVideoPlayer: $currentVideoPlayer
+        )
+        .sheet(isPresented: $showingReportVideo) {
+            ReportVideoView(
+                isPresented: $showingReportVideo,
+                onSubmit: { email, reason in
+                    submitFlagReport(email: email, reason: reason)
+                },
+                onCancel: {
+                    cancelReport()
+                }
+            )
         }
-        
-        // Add reason picker - using a simple picker instead of segmented control
-        let pickerView = UIPickerView()
-        let reasons = ["Inappropriate", "Misleading", "Harmful", "Other"]
-        
-        class ReasonPickerDelegate: NSObject, UIPickerViewDelegate, UIPickerViewDataSource {
-            let reasons: [String]
-            var selectedReason: String
-            
-            init(reasons: [String]) {
-                self.reasons = reasons
-                self.selectedReason = reasons.first ?? ""
-                super.init()
-            }
-            
-            func numberOfComponents(in pickerView: UIPickerView) -> Int {
-                return 1
-            }
-            
-            func pickerView(_ pickerView: UIPickerView, numberOfRowsInComponent component: Int) -> Int {
-                return reasons.count
-            }
-            
-            func pickerView(_ pickerView: UIPickerView, titleForRow row: Int, forComponent component: Int) -> String? {
-                return reasons[row]
-            }
-            
-            func pickerView(_ pickerView: UIPickerView, didSelectRow row: Int, inComponent component: Int) {
-                selectedReason = reasons[row]
-            }
-        }
-        
-        let pickerDelegate = ReasonPickerDelegate(reasons: reasons)
-        pickerView.delegate = pickerDelegate
-        pickerView.dataSource = pickerDelegate
-        
-        // Create a container for the picker that respects auto layout
-        let containerView = UIView()
-        containerView.translatesAutoresizingMaskIntoConstraints = false
-        pickerView.translatesAutoresizingMaskIntoConstraints = false
-        containerView.addSubview(pickerView)
-        
-        NSLayoutConstraint.activate([
-            pickerView.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
-            pickerView.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
-            pickerView.topAnchor.constraint(equalTo: containerView.topAnchor),
-            pickerView.bottomAnchor.constraint(equalTo: containerView.bottomAnchor),
-            pickerView.heightAnchor.constraint(equalToConstant: 120)
-        ])
-        
-        alert.view.addSubview(containerView)
-        containerView.translatesAutoresizingMaskIntoConstraints = false
-        
-        // Adjust alert height to fit the picker
-        NSLayoutConstraint.activate([
-            containerView.topAnchor.constraint(equalTo: alert.view.topAnchor, constant: 80),
-            containerView.leadingAnchor.constraint(equalTo: alert.view.leadingAnchor, constant: 15),
-            containerView.trailingAnchor.constraint(equalTo: alert.view.trailingAnchor, constant: -15),
-            alert.view.heightAnchor.constraint(greaterThanOrEqualToConstant: 270)
-        ])
-        
-        // Add submit action
-        alert.addAction(UIAlertAction(title: "Submit", style: .default, handler: { _ in
-            guard let emailField = alert.textFields?.first,
-                  let email = emailField.text, !email.isEmpty else {
-                return
-            }
-            
-            // Get selected reason from picker delegate
-            let reason = pickerDelegate.selectedReason
-            
-            // Send flag report
-            self.submitFlagReport(email: email, reason: reason)
-            
-            // Dismiss player and return to map
-            Task {
-                await self.dismissViewController(playerVC, animated: true)
-                
-                // Show confirmation alert
-                let confirmAlert = UIAlertController(
-                    title: "Report Submitted",
-                    message: "Thank you. We'll review this video and contact you at \(email).",
-                    preferredStyle: .alert
-                )
-                confirmAlert.addAction(UIAlertAction(title: "OK", style: .default))
-                rootVC.present(confirmAlert, animated: true)
-            }
-        }))
-        
-        // Add cancel action
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel, handler: { _ in
-            // Resume video playback
-            playerVC.player?.play()
-        }))
-        
-        // Present alert
-        playerVC.present(alert, animated: true)
     }
     
     private func submitFlagReport(email: String, reason: String) {
-        // Implement Firebase submission
         Task {
             do {
-                // Use the MapViewModel's reportVideo method instead of accessing db directly
-                let videoId = parent.viewModel.currentlyPlayingVideoId ?? "unknown"
-                try await parent.viewModel.reportVideo(email: email, reason: reason, videoId: videoId)
+                let videoId = viewModel.currentlyPlayingVideoId ?? "unknown"
+                try await viewModel.reportVideo(email: email, reason: reason, videoId: videoId)
                 print("Flag report submitted successfully")
+                
+                // Show success message and dismiss player
+                await MainActor.run {
+                    if let playerVC = currentVideoPlayer {
+                        playerVC.dismiss(animated: true) {
+                            // Show confirmation alert after player is dismissed
+                            if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                               let rootVC = scene.windows.first?.rootViewController {
+                                let confirmAlert = UIAlertController(
+                                    title: "Report Submitted",
+                                    message: "Thank you. We'll review this video and contact you at \(email).",
+                                    preferredStyle: .alert
+                                )
+                                confirmAlert.addAction(UIAlertAction(title: "OK", style: .default))
+                                rootVC.present(confirmAlert, animated: true)
+                            }
+                        }
+                    }
+                    currentVideoPlayer = nil
+                }
             } catch {
                 print("Error submitting flag report: \(error.localizedDescription)")
+                await MainActor.run {
+                    viewModel.showError("Failed to submit report: \(error.localizedDescription)")
+                }
             }
         }
+    }
+    
+    private func cancelReport() {
+        // Resume video playback
+        currentVideoPlayer?.player?.play()
     }
 }
 
@@ -786,5 +712,145 @@ extension Array {
     subscript(safe index: Index) -> Element? {
         return indices.contains(index) ? self[index] : nil
     }
-} 
+}
+
+// Function to play video for a pin
+func playVideo(for pin: Pin) {
+    guard !pin.videoURL.isEmpty else {
+        // First try to refresh the pin from Firestore to get the latest data
+        Task {
+            do {
+                print("[MapView] Attempting to refresh pin data from Firestore for \(pin.id)")
+                let refreshedPin = try await refreshPinFromFirestore(pinId: pin.id)
+                
+                if let refreshedPin = refreshedPin, !refreshedPin.videoURL.isEmpty {
+                    print("[MapView] Successfully refreshed pin with video URL: \(refreshedPin.videoURL)")
+                    await MainActor.run {
+                        // Play the video with the refreshed URL
+                        playVideoWithURL(refreshedPin.videoURL, for: refreshedPin)
+                    }
+                } else {
+                    // Still no video URL after refresh
+                    let error = NSError(domain: "VideoPlayback", code: -1, userInfo: [NSLocalizedDescriptionKey: "This pin has no video attached."])
+                    print("Error during video playback: \(error)")
+                    
+                    // Show error alert
+                    let alert = UIAlertController(title: "Video Unavailable", message: "This pin has no video attached.", preferredStyle: .alert)
+                    alert.addAction(UIAlertAction(title: "OK", style: .default))
+                    
+                    if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                       let rootVC = windowScene.windows.first?.rootViewController {
+                        var topVC = rootVC
+                        while let presentedVC = topVC.presentedViewController {
+                            topVC = presentedVC
+                        }
+                        topVC.present(alert, animated: true)
+                    }
+                }
+            } catch {
+                print("[MapView] Error refreshing pin data: \(error.localizedDescription)")
+                let errorAlert = UIAlertController(title: "Error", message: "Failed to load video: \(error.localizedDescription)", preferredStyle: .alert)
+                errorAlert.addAction(UIAlertAction(title: "OK", style: .default))
+                
+                if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                   let rootVC = windowScene.windows.first?.rootViewController {
+                    var topVC = rootVC
+                    while let presentedVC = topVC.presentedViewController {
+                        topVC = presentedVC
+                    }
+                    topVC.present(errorAlert, animated: true)
+                }
+            }
+        }
+        return
+    }
+    
+    // If we already have a video URL, play it directly
+    playVideoWithURL(pin.videoURL, for: pin)
+}
+
+// Helper function to refresh a pin from Firestore
+func refreshPinFromFirestore(pinId: String) async throws -> Pin? {
+    print("[MapView] Refreshing pin data for ID: \(pinId)")
+    let db = Firestore.firestore()
+    let docRef = db.collection("pins").document(pinId)
+    
+    let snapshot = try await docRef.getDocument()
+    guard let data = snapshot.data() else {
+        print("[MapView] No data found for pin ID: \(pinId)")
+        return nil
+    }
+    
+    // Extract pin data
+    guard let id = data["id"] as? String,
+          let latitude = data["latitude"] as? Double,
+          let longitude = data["longitude"] as? Double,
+          let typeString = data["type"] as? String,
+          let userId = data["userId"] as? String else {
+        print("[MapView] Invalid pin data format")
+        return nil
+    }
+    
+    let coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+    let incidentType = IncidentType.from(firestoreType: typeString)
+    let videoURL = data["videoURL"] as? String ?? ""
+    
+    print("[MapView] Refreshed pin data - videoURL: '\(videoURL)'")
+    
+    return Pin(id: id, coordinate: coordinate, incidentType: incidentType, videoURL: videoURL, userId: userId)
+}
+
+// Helper function to play video with URL
+func playVideoWithURL(_ videoURL: String, for pin: Pin) {
+    print("[MapView] Attempting to play video for pin \(pin.id), videoURL: '\(videoURL)', isEmpty: \(videoURL.isEmpty)")
+    
+    guard !videoURL.isEmpty else {
+        let error = NSError(domain: "VideoPlayback", code: -1, userInfo: [NSLocalizedDescriptionKey: "This pin has no video attached."])
+        print("Error during video playback: \(error)")
+        
+        // Show error alert
+        let alert = UIAlertController(title: "Video Unavailable", message: "This pin has no video attached.", preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        
+        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+           let rootVC = windowScene.windows.first?.rootViewController {
+            var topVC = rootVC
+            while let presentedVC = topVC.presentedViewController {
+                topVC = presentedVC
+            }
+            topVC.present(alert, animated: true)
+        }
+        return
+    }
+    
+    // Play video from URL
+    if let url = URL(string: videoURL) {
+        print("Playing directly from URL...")
+        let player = AVPlayer(url: url)
+        let playerViewController = AVPlayerViewController()
+        playerViewController.player = player
+        
+        // Find the view controller to present from
+        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+           let rootVC = windowScene.windows.first?.rootViewController {
+            var topVC = rootVC
+            while let presentedVC = topVC.presentedViewController {
+                topVC = presentedVC
+            }
+            
+            topVC.present(playerViewController, animated: true) {
+                print("Presentation completion handler executed for AVPlayerViewController")
+                player.play()
+            }
+            
+            // Add observer to clean up when done
+            NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: player.currentItem, queue: .main) { _ in
+                print("Player item finished playing. Cleaning up temp file: \(url.lastPathComponent)")
+                playerViewController.dismiss(animated: true)
+            }
+        }
+    } else {
+        print("Invalid video URL format")
+    }
+}
 
