@@ -478,8 +478,34 @@ class VideoRecorderDelegateAdapter: NSObject, UIImagePickerControllerDelegate,
 
       print("[VideoRecorderDelegateAdapter] Video prepared successfully, starting upload...")
 
-      // Start upload
-      try await self.viewModel.dropPinWithVideo(for: self.incidentType, videoURL: tempURL)
+      // Check if file exists at the temporary URL
+      if FileManager.default.fileExists(atPath: tempURL.path) {
+        print(
+          "[VideoRecorderDelegateAdapter] Video file exists at temporary location: \(tempURL.path)")
+      } else {
+        print("[VideoRecorderDelegateAdapter] ERROR: Video file not found at: \(tempURL.path)")
+      }
+
+      // Set the pending coordinate if it's not already set
+      if self.viewModel.pendingCoordinate == nil,
+        let userLocation = self.viewModel.userLocation?.coordinate
+      {
+        print(
+          "[VideoRecorderDelegateAdapter] Setting pending coordinate to user location: \(userLocation)"
+        )
+        await MainActor.run {
+          self.viewModel.pendingCoordinate = userLocation
+        }
+      }
+
+      // Start upload with explicit error handling
+      do {
+        try await self.viewModel.dropPinWithVideo(for: self.incidentType, videoURL: tempURL)
+        print("[VideoRecorderDelegateAdapter] Upload completed successfully")
+      } catch {
+        print("[VideoRecorderDelegateAdapter] Error during dropPinWithVideo: \(error)")
+        throw error
+      }
 
     } catch {
       print("[VideoRecorderDelegateAdapter] Error processing video: \(error.localizedDescription)")
