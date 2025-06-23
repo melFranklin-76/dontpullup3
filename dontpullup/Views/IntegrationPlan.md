@@ -1,7 +1,7 @@
 # Simplified Pin Reporting Flow Integration Plan
 
 ## Overview
-This document outlines how to implement the simplified reporting process where a user can long-press on the map to drop a pin, select an incident type, choose a video from their photo library, and have the pin appear on the map in real-time.
+This document outlines how to implement the simplified reporting process where a user can long-press on the map to drop a pin, select an incident type, choose a video from their photo library or record a live video (up to 3 minutes), and have the pin appear on the map in real-time.
 
 ## Implementation Steps
 
@@ -171,13 +171,87 @@ toolbarButton(
 )
 ```
 
+### 7. Implement Media Source Selection in IncidentTypePicker
+
+```swift
+// In IncidentTypePicker.swift
+import AVKit
+
+struct IncidentTypePicker: View {
+    @ObservedObject var viewModel: MapViewModel
+    @Environment(\.presentationMode) var presentationMode
+    @State private var selectedType: IncidentType?
+    @State private var shouldPresentPicker = false
+    @State private var showMediaOptions = false
+    
+    var body: some View {
+        // ... existing view code ...
+        
+        .actionSheet(isPresented: $showMediaOptions) {
+            ActionSheet(
+                title: Text("Add Media"),
+                message: Text("Choose a video source"),
+                buttons: [
+                    .default(Text("Choose from Library")) {
+                        if let type = selectedType {
+                            shouldPresentPicker = true
+                        }
+                    },
+                    .default(Text("Record Video (3 min max)")) {
+                        if let type = selectedType {
+                            presentVideoRecorder(for: type, viewModel: viewModel, presentationMode: presentationMode)
+                        }
+                    },
+                    .cancel()
+                ]
+            )
+        }
+        // ... rest of the view code ...
+    }
+}
+
+// Helper function to present the video recorder
+@MainActor
+func presentVideoRecorder(for incidentType: IncidentType, viewModel: MapViewModel, presentationMode: Binding<PresentationMode>) {
+    // Check camera permission first
+    AVCaptureDevice.requestAccess(for: .video) { granted in
+        DispatchQueue.main.async {
+            if granted {
+                // Create and configure the image picker for video recording
+                let imagePicker = UIImagePickerController()
+                imagePicker.sourceType = .camera
+                imagePicker.mediaTypes = ["public.movie"]
+                imagePicker.cameraCaptureMode = .video
+                imagePicker.videoMaximumDuration = 180 // 3 minutes
+                imagePicker.videoQuality = .typeHigh
+                imagePicker.allowsEditing = true
+                
+                // Create the delegate adapter and present recorder
+                // ... implementation details ...
+            } else {
+                viewModel.showError("Please allow access to your camera in Settings to record videos")
+                // Optionally open settings
+            }
+        }
+    }
+}
+
+// Delegate adapter for handling video recording with UIImagePickerController
+class VideoRecorderDelegateAdapter: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+    // Implementation for handling recorded videos
+    // ... implementation details ...
+}
+```
+
 ## Testing the Flow
 
 ### Pin Creation
 1. Sign in to the app (verify error message if not signed in)
 2. Long-press on map within range of current location
 3. Select incident type from the minimalist picker
-4. Choose a video from the system Photos app
+4. Choose between "Choose from Library" or "Record Video (3 min max)"
+   - If choosing from library: Select a video from the system Photos app
+   - If recording: Record a video up to 3 minutes using the native camera interface
 5. Verify the upload progress indicator appears non-intrusively
 6. Confirm the pin appears on the map immediately after upload with correct emoji
 
@@ -195,10 +269,11 @@ toolbarButton(
 - [x] Long-press initiates the flow within 200ft of user location
 - [x] Minimal incident type picker
 - [x] Native iOS Photos picker for video selection
+- [x] Option to record video directly using native camera interface
 - [x] 3-minute maximum video duration enforcement
 - [x] Non-blocking, minimal upload progress indicator
 - [x] Real-time pin updates
 - [x] User can filter to see only their own pins
 - [x] User can delete only their own pins through edit mode
 - [x] No multi-page wizards or confirmation screens
-- [x] No custom camera interfaces 
+- [x] Uses native camera and photo library interfaces 
