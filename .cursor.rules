@@ -1,0 +1,31 @@
+[project]
+root = "/Users/melfranklin/Desktop/untitled folder/Dontpullup 3"
+ignore = ["../*", "/.*"]
+
+# 1) Async calls must use await
+[rule.async_must_await]
+scope = "*.swift"
+pattern = "\b(?!await )([A-Za-z0-9_]+)\(.*\)"
+message = "Async calls must use 'await'"
+action = "suggest_prefix await"
+
+# 2) No unreachable catch
+[rule.no_unreachable_catch]
+scope = "*.swift"
+pattern = "do \{(?:[^}]*?)(?!try)[^}]*?\}\s*catch"
+message = "Unreachable 'catch' block: no throwing calls inside do"
+action = "highlight-and-remove"
+
+# 3) Explicit self in closures
+[rule.explicit_self]
+scope = "*.swift"
+pattern = "(?<!self\.)\b(activeUploads|uploadProgress)\b"
+message = "Use 'self.' to clarify capture semantics"
+action = "suggest_prefix self."
+
+# 4) MainActor wrap
+[rule.mainactor_wrap]
+scope = "*.swift"
+pattern = "@Published var|Task\s*\{[^}]*?\}"
+message = "Mutating @MainActor properties outside MainActor context—wrap in Task {@MainActor in ...}"
+action = "suggest_wrap_MainActor"
