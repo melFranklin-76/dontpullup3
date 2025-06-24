@@ -1,5 +1,6 @@
 import FirebaseAuth
 import FirebaseFirestore
+import StoreKit
 import SwiftUI
 
 struct ProfileView: View {
@@ -18,6 +19,17 @@ struct ProfileView: View {
   @State private var isUpdatingZipCode = false
   @State private var zipCodeError = ""
   @State private var showZipCodeError = false
+  @State private var originalZipCode = ""
+
+  // Premium upgrade state
+  @State private var isPremium = false
+  @State private var showPremiumUpgrade = false
+  @State private var showPurchaseError = false
+  @State private var purchaseErrorMessage = ""
+  @State private var showPremiumSuccess = false
+
+  // Access premium manager
+  @StateObject private var premiumManager = PremiumManager.shared
 
   var body: some View {
     // Content wrapped in the universal scroll view
@@ -50,6 +62,58 @@ struct ProfileView: View {
                 .font(.caption)
                 .foregroundColor(.gray)
             }
+
+            // Premium badge if applicable
+            if isPremium {
+              HStack {
+                Image(systemName: "star.fill")
+                  .foregroundColor(.yellow)
+                Text("Premium Member")
+                  .font(.subheadline)
+                  .fontWeight(.medium)
+                  .foregroundColor(.yellow)
+              }
+              .padding(.horizontal, 12)
+              .padding(.vertical, 6)
+              .background(Color.black.opacity(0.6))
+              .cornerRadius(15)
+            }
+          }
+        }
+
+        // Premium upgrade card (only show if not premium)
+        if !isPremium {
+          DPUCard {
+            VStack(alignment: .leading, spacing: 12) {
+              HStack {
+                Image(systemName: "star.fill")
+                  .foregroundColor(.yellow)
+                Text("Premium Features")
+                  .font(.headline)
+                  .foregroundColor(.white)
+                Spacer()
+              }
+              .padding(.top, 4)
+
+              Text(
+                "Upgrade to premium for only $0.99 to unlock changing between different zip codes and viewing incidents from anywhere."
+              )
+              .font(.subheadline)
+              .foregroundColor(.white)
+              .padding(.bottom, 4)
+
+              Button(action: {
+                showPremiumUpgrade = true
+              }) {
+                Text("Upgrade Now - $0.99")
+                  .fontWeight(.semibold)
+                  .frame(maxWidth: .infinity)
+                  .padding()
+                  .background(Color.yellow)
+                  .foregroundColor(.black)
+                  .cornerRadius(8)
+              }
+            }
           }
         }
 
@@ -66,6 +130,18 @@ struct ProfileView: View {
               .foregroundColor(.gray)
               .padding(.bottom, 4)
 
+            if !isPremium {
+              Text("Original Zip Code: \(originalZipCode) (Locked)")
+                .font(.caption)
+                .foregroundColor(.orange)
+                .padding(.bottom, 4)
+
+              Text("Premium upgrade required to change your zip code")
+                .font(.caption)
+                .foregroundColor(.gray)
+                .padding(.bottom, 8)
+            }
+
             TextField("Zip Code", text: $newZipCode)
               .padding()
               .background(Color.white.opacity(0.1))
@@ -81,6 +157,8 @@ struct ProfileView: View {
                 // Filter non-numeric characters
                 newZipCode = newValue.filter { "0123456789".contains($0) }
               }
+              .disabled(!isPremium && newZipCode == originalZipCode)  // Disable if not premium and equals original
+              .opacity(!isPremium ? 0.6 : 1.0)
               .padding(.vertical, 4)
 
             Button(action: {
@@ -100,11 +178,16 @@ struct ProfileView: View {
             }
             .frame(maxWidth: .infinity)
             .padding()
-            .background(Color.blue)
+            .background((!isPremium && newZipCode != originalZipCode) ? Color.gray : Color.blue)
             .foregroundColor(.white)
             .cornerRadius(8)
-            .disabled(isUpdatingZipCode || (isEditingZipCode && newZipCode.isEmpty))
-            .opacity(isUpdatingZipCode || (isEditingZipCode && newZipCode.isEmpty) ? 0.6 : 1.0)
+            .disabled(
+              !isPremium && newZipCode != originalZipCode || isUpdatingZipCode
+                || (isEditingZipCode && newZipCode.isEmpty)
+            )
+            .opacity(
+              (!isPremium && newZipCode != originalZipCode) || isUpdatingZipCode
+                || (isEditingZipCode && newZipCode.isEmpty) ? 0.6 : 1.0)
           }
         }
 
@@ -186,12 +269,33 @@ struct ProfileView: View {
     } message: {
       Text(zipCodeError)
     }
+    .alert("Purchase Error", isPresented: $showPurchaseError) {
+      Button("OK", role: .cancel) {}
+    } message: {
+      Text(purchaseErrorMessage)
+    }
+    .alert("Premium Upgrade Successful", isPresented: $showPremiumSuccess) {
+      Button("OK", role: .cancel) {}
+    } message: {
+      Text(
+        "You now have premium access! You can now change your zip code to view incidents from anywhere."
+      )
+    }
+    .sheet(isPresented: $showPremiumUpgrade) {
+      PremiumUpgradeView(isPremium: $isPremium, showSuccess: $showPremiumSuccess)
+        .preferredColorScheme(.dark)
+    }
     .onAppear {
       loadUserProfile()
+
+      // Observe premium status updates
+      NotificationCenter.default.addObserver(
+        forName: Notification.Name("UserPremiumStatusUpdated"), object: nil, queue: .main
+      ) { _ in
+        self.isPremium = true
+      }
     }
   }
-
-  // The rest of the methods stay the same
 
   // Method to load the user profile
   private func loadUserProfile() {
@@ -202,12 +306,16 @@ struct ProfileView: View {
           let docRef = Firestore.firestore().collection("users").document(user.uid)
           let document = try await docRef.getDocument()
 
-          if let data = document.data(),
-            let zipCode = data["zipCode"] as? String
-          {
+          if let data = document.data() {
+            let zipCode = data["zipCode"] as? String ?? ""
+            let originalZipFromDB = data["originalZipCode"] as? String ?? zipCode
+            let isPremiumFromDB = data["isPremium"] as? Bool ?? false
+
             // Update UI on main thread
             await MainActor.run {
               self.newZipCode = zipCode
+              self.originalZipCode = originalZipFromDB
+              self.isPremium = isPremiumFromDB
             }
           }
         } catch {
@@ -239,6 +347,13 @@ struct ProfileView: View {
 
     if newZipCode.count != 5 {
       zipCodeError = "Zip code must be 5 digits"
+      showZipCodeError = true
+      return
+    }
+
+    // Check if user is allowed to update to this zip code
+    if !isPremium && newZipCode != originalZipCode {
+      zipCodeError = "Premium upgrade required to change your zip code"
       showZipCodeError = true
       return
     }
@@ -329,6 +444,146 @@ struct ProfileView: View {
     for document in querySnapshot.documents {
       try await document.reference.delete()
     }
+  }
+}
+
+// Premium Upgrade View
+struct PremiumUpgradeView: View {
+  @StateObject private var premiumManager = PremiumManager.shared
+  @Environment(\.dismiss) private var dismiss
+  @Binding var isPremium: Bool
+  @Binding var showSuccess: Bool
+  @State private var showPurchaseError = false
+
+  var body: some View {
+    NavigationView {
+      NoBounceScrollView {
+        VStack(spacing: 24) {
+          // Premium header
+          VStack(spacing: 12) {
+            Image(systemName: "star.circle.fill")
+              .resizable()
+              .scaledToFit()
+              .frame(width: 80)
+              .foregroundColor(.yellow)
+              .padding(.top)
+
+            Text("Premium Upgrade")
+              .font(.title2)
+              .fontWeight(.bold)
+              .foregroundColor(.white)
+
+            Text("Unlock full access to incidents across all zip codes")
+              .font(.subheadline)
+              .foregroundColor(.gray)
+              .multilineTextAlignment(.center)
+              .padding(.horizontal)
+          }
+
+          // Feature list
+          DPUCard {
+            VStack(alignment: .leading, spacing: 16) {
+              FeatureRow(icon: "mappin.and.ellipse", text: "View incidents from any location")
+              FeatureRow(icon: "location.fill", text: "Change your zip code anytime")
+              FeatureRow(icon: "bell.fill", text: "Get notifications from multiple areas")
+              FeatureRow(icon: "lock.open.fill", text: "One-time purchase, no subscription")
+            }
+            .padding(.vertical, 8)
+          }
+
+          Spacer(minLength: 20)
+
+          // Purchase button
+          Button(action: {
+            if premiumManager.products.isEmpty {
+              premiumManager.purchaseError =
+                "Cannot connect to App Store. Please check your connection or try again later."
+              showPurchaseError = true
+            } else {
+              premiumManager.purchasePremium()
+            }
+          }) {
+            if premiumManager.isLoading {
+              ProgressView()
+                .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                .padding()
+            } else {
+              Text("Upgrade Now - $0.99")
+                .font(.headline)
+                .foregroundColor(.black)
+                .frame(maxWidth: .infinity)
+                .padding()
+                .background(Color.yellow)
+                .cornerRadius(12)
+                .shadow(color: .black.opacity(0.2), radius: 2, x: 0, y: 2)
+            }
+          }
+          .padding(.horizontal)
+          .disabled(premiumManager.isLoading)
+
+          // Restore purchases button
+          Button(action: {
+            premiumManager.restorePurchases()
+          }) {
+            Text("Restore Purchases")
+              .font(.subheadline)
+              .foregroundColor(.blue)
+          }
+          .padding(.bottom)
+          .disabled(premiumManager.isLoading)
+        }
+        .padding()
+      }
+      .navigationBarItems(trailing: Button("Close") { dismiss() })
+      .navigationBarTitle("", displayMode: .inline)
+      .onChange(of: premiumManager.purchaseSuccess) { success in
+        if success {
+          isPremium = true
+          showSuccess = true
+          DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            dismiss()
+            premiumManager.resetPurchaseState()
+          }
+        }
+      }
+      .onChange(of: premiumManager.purchaseError) { error in
+        if error != nil {
+          // Error is shown in alert below
+          showPurchaseError = true
+        }
+      }
+      .alert("Purchase Error", isPresented: $showPurchaseError) {
+        Button("OK") {
+          premiumManager.resetPurchaseState()
+        }
+      } message: {
+        Text(premiumManager.purchaseError ?? "An unknown error occurred")
+      }
+      .onDisappear {
+        premiumManager.resetPurchaseState()
+      }
+    }
+  }
+}
+
+struct FeatureRow: View {
+  let icon: String
+  let text: String
+
+  var body: some View {
+    HStack(spacing: 16) {
+      Image(systemName: icon)
+        .font(.system(size: 20))
+        .foregroundColor(.yellow)
+        .frame(width: 24)
+
+      Text(text)
+        .font(.body)
+        .foregroundColor(.white)
+
+      Spacer()
+    }
+    .padding(.horizontal)
   }
 }
 

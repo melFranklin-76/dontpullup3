@@ -162,9 +162,12 @@ struct AuthView: View {
       }
       .alert(isPresented: $showError) {
         Alert(
-          title: Text("Account Setup Issue"),
+          title: Text("Password Requirement"),
           message: Text(errorMessage),
-          dismissButton: .default(Text("OK")))
+          dismissButton: .default(Text("OK")) {
+            // Ensure dismissal clears the loading state
+            self.isLoading = false
+          })
       }
     }
   }
@@ -399,9 +402,12 @@ struct AuthView: View {
               .cornerRadius(3)
           }
 
-          Text("Password must be at least 8 characters with at least one letter and one number")
-            .font(.system(size: adaptiveFontSize(for: geometry, baseSize: 12)))
-            .foregroundColor(.white.opacity(0.7))
+          Text(
+            "Password must have at least 8 characters with at least one uppercase letter, one lowercase letter, and one number"
+          )
+          .font(.system(size: adaptiveFontSize(for: geometry, baseSize: 12)))
+          .foregroundColor(.white.opacity(0.7))
+          .multilineTextAlignment(.leading)
         }
         .padding(.top, 4)
       }
@@ -509,40 +515,59 @@ struct AuthView: View {
   }
 
   private func performSignUp() {
+    print("[AuthView] Starting sign-up validation")
+
+    // Reset any previous error state
+    isLoading = false
+
     // Validate email
     let emailValidation = validateEmail(email)
     if !emailValidation.isValid {
+      print("[AuthView] Email validation failed: \(emailValidation.message ?? "Unknown error")")
       errorMessage = emailValidation.message ?? "Invalid email address"
-      showError = true
+      DispatchQueue.main.async {
+        self.showError = true
+      }
       return
     }
 
-    // Validate password
+    // Validate password - THIS IS MOST CRUCIAL
     let passwordValidation = validatePassword(password)
     if !passwordValidation.isValid {
+      print(
+        "[AuthView] Password validation failed: \(passwordValidation.message ?? "Unknown error")")
       errorMessage = passwordValidation.message ?? "Invalid password"
-      showError = true
+      DispatchQueue.main.async {
+        self.showError = true
+      }
       return
     }
 
     // Validate zip code
     let zipValidation = validateZipCode(zipCode)
     if !zipValidation.isValid {
+      print("[AuthView] Zip code validation failed: \(zipValidation.message ?? "Unknown error")")
       errorMessage = zipValidation.message ?? "Invalid zip code"
-      showError = true
+      DispatchQueue.main.async {
+        self.showError = true
+      }
       return
     }
+
+    print("[AuthView] All validations passed, proceeding with sign-up")
 
     // All validations passed, proceed with sign up
     isLoading = true
     authState.signUp(email: email, password: password, zipCode: zipCode) { result in
-      isLoading = false
-      switch result {
-      case .success(_):
-        isShowingSignUp = false
-      case .failure(let error):
-        errorMessage = error.localizedDescription
-        showError = true
+      DispatchQueue.main.async {
+        self.isLoading = false
+        switch result {
+        case .success(_):
+          self.isShowingSignUp = false
+        case .failure(let error):
+          self.errorMessage = error.localizedDescription
+          self.showError = true
+        }
       }
     }
   }
@@ -581,7 +606,7 @@ struct AuthView: View {
   }
 
   private func validatePassword(_ password: String) -> (isValid: Bool, message: String?) {
-    // Password requirements - at least 8 characters with at least one number and one letter
+    // Password requirements - comprehensive validation
     if password.isEmpty {
       return (false, "Password cannot be empty")
     }
@@ -590,11 +615,19 @@ struct AuthView: View {
       return (false, "Password must be at least 8 characters long")
     }
 
-    let hasLetter = password.rangeOfCharacter(from: .letters) != nil
-    let hasNumber = password.rangeOfCharacter(from: .decimalDigits) != nil
+    let hasUppercase = password.rangeOfCharacter(from: .uppercaseLetters) != nil
+    if !hasUppercase {
+      return (false, "Password must contain at least one uppercase letter")
+    }
 
-    if !hasLetter || !hasNumber {
-      return (false, "Password must contain at least one letter and one number")
+    let hasLowercase = password.rangeOfCharacter(from: .lowercaseLetters) != nil
+    if !hasLowercase {
+      return (false, "Password must contain at least one lowercase letter")
+    }
+
+    let hasNumber = password.rangeOfCharacter(from: .decimalDigits) != nil
+    if !hasNumber {
+      return (false, "Password must contain at least one number")
     }
 
     return (true, nil)
@@ -618,16 +651,18 @@ struct AuthView: View {
       return .gray.opacity(0.5)
     }
 
-    // Basic requirements check
+    // Password requirements check
     let hasMinLength = password.count >= 8
-    let hasLetter = password.rangeOfCharacter(from: .letters) != nil
+    let hasUppercase = password.rangeOfCharacter(from: .uppercaseLetters) != nil
+    let hasLowercase = password.rangeOfCharacter(from: .lowercaseLetters) != nil
     let hasNumber = password.rangeOfCharacter(from: .decimalDigits) != nil
     let hasSpecial = password.rangeOfCharacter(from: .punctuationCharacters) != nil
 
-    // Calculate "strength score" 0-4
+    // Calculate "strength score" 0-5
     var score = 0
     if hasMinLength { score += 1 }
-    if hasLetter { score += 1 }
+    if hasUppercase { score += 1 }
+    if hasLowercase { score += 1 }
     if hasNumber { score += 1 }
     if hasSpecial { score += 1 }
 
@@ -636,7 +671,7 @@ struct AuthView: View {
     case 1: return .red
     case 2: return .orange
     case 3: return .yellow
-    case 4: return .green
+    case 4, 5: return .green
     default: return .gray.opacity(0.5)
     }
   }

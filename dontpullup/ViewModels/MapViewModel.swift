@@ -61,11 +61,26 @@ class MapViewModel: NSObject, ObservableObject {
   // MARK: - Computed Properties
   var filteredPins: [Pin] {
     pins.filter { pin in
+      // First apply user filter if enabled
       if showingOnlyMyPins {
         guard let currentUserId = Auth.auth().currentUser?.uid else { return false }
         return pin.userId == currentUserId
       }
-      return selectedFilters.isEmpty || selectedFilters.contains(pin.incidentType)
+
+      // Apply incident type filter
+      let passesTypeFilter = selectedFilters.isEmpty || selectedFilters.contains(pin.incidentType)
+
+      // Apply zip code restriction for non-premium users
+      if let userProfile = authManager.currentUserProfile, !userProfile.isPremium {
+        // For non-premium users, only show pins in their original zip code
+        let pinInUserZipCode = pin.zipCode == userProfile.originalZipCode
+
+        // Show pins that pass both the type filter and are in user's original zip code
+        return passesTypeFilter && pinInUserZipCode
+      }
+
+      // Premium users see all pins that match their type filters
+      return passesTypeFilter
     }
   }
 
@@ -744,16 +759,26 @@ class MapViewModel: NSObject, ObservableObject {
           let coordinate = CLLocationCoordinate2D(
             latitude: latitudeValue, longitude: longitudeValue)
           let videoURL = data["videoURL"] as? String ?? ""
+          let zipCode = data["zipCode"] as? String ?? ""  // Get zip code if available
 
           let incidentType = IncidentType.fromFirestoreType(typeString)
 
-          return Pin(
+          var pin = Pin(
             id: idString,
             coordinate: coordinate,
             incidentType: incidentType,
             videoURL: videoURL,
             userId: userIdString
           )
+
+          pin.zipCode = zipCode  // Set zip code
+
+          // If pin doesn't have a zip code, try to determine it based on current user's zip code
+          if zipCode.isEmpty, let userProfile = self.authManager.currentUserProfile {
+            pin.zipCode = userProfile.zipCode
+          }
+
+          return pin
         }
 
         self.pins = loadedPins
@@ -966,6 +991,14 @@ class MapViewModel: NSObject, ObservableObject {
                 self.uploadProgress = 0.95
               }
 
+              // Get user's current zip code
+              // Get zip code synchronously, as we can't use await in this completion handler
+              var userZipCode = ""
+              // Run a synchronous dispatch to the main thread to get the zip code
+              DispatchQueue.main.sync {
+                userZipCode = self.authManager.currentUserProfile?.zipCode ?? ""
+              }
+
               // Create pin data
               let pinData: [String: Any] = [
                 "id": pinId,
@@ -975,6 +1008,7 @@ class MapViewModel: NSObject, ObservableObject {
                 "videoURL": downloadURL.absoluteString,
                 "userId": currentUserId,
                 "timestamp": FieldValue.serverTimestamp(),
+                "zipCode": userZipCode,  // Add zip code to the pin data
               ]
 
               // Add pin to Firestore
