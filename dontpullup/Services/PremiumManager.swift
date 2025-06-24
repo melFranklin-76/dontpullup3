@@ -40,6 +40,15 @@ class PremiumManager: NSObject, ObservableObject {
   }
 
   func purchasePremium() {
+    print("[PremiumManager] purchasePremium() called - products count: \(products.count)")
+
+    // Always print simulator status for debugging
+    #if targetEnvironment(simulator)
+      print("[PremiumManager] Running in simulator environment")
+    #else
+      print("[PremiumManager] Running on a real device")
+    #endif
+
     guard let product = products.first(where: { $0.productIdentifier == zipCodeUnlockProductID })
     else {
       // Special handling for simulator or when products can't load
@@ -48,12 +57,14 @@ class PremiumManager: NSObject, ObservableObject {
         simulatePurchaseForTesting()
         return
       #else
+        print("[PremiumManager] Product not found and not in simulator - showing error")
         purchaseError = "Product not available. Please try again later."
         return
       #endif
     }
 
     isLoading = true
+    print("[PremiumManager] Found product, initiating purchase: \(product.productIdentifier)")
 
     // Create payment request
     let payment = SKPayment(product: product)
@@ -62,6 +73,7 @@ class PremiumManager: NSObject, ObservableObject {
 
   // Special method to simulate purchases in simulator
   private func simulatePurchaseForTesting() {
+    print("[PremiumManager] Starting simulated purchase flow")
     isLoading = true
 
     // Simulate network delay
@@ -81,6 +93,11 @@ class PremiumManager: NSObject, ObservableObject {
           name: Notification.Name("UserPremiumStatusUpdated"), object: nil)
 
         print("[PremiumManager] Simulated purchase notification posted")
+
+        // Print current state for debugging
+        print(
+          "[PremiumManager] Current state - success: \(self.purchaseSuccess), loading: \(self.isLoading), error: \(self.purchaseError ?? "none")"
+        )
       }
 
       // Also try the real update for completeness
