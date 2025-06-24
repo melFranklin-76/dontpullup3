@@ -72,7 +72,7 @@ class PremiumManager: NSObject, ObservableObject {
   }
 
   // Special method to simulate purchases in simulator
-  private func simulatePurchaseForTesting() {
+  func simulatePurchaseForTesting() {
     print("[PremiumManager] Starting simulated purchase flow")
     isLoading = true
 

@@ -57,12 +57,17 @@ struct PremiumView: View {
 
         // Purchase button
         Button(action: {
-          if premiumManager.products.isEmpty {
-            premiumManager.purchaseError = "Cannot connect to App Store. Please try again later."
-            showAlert = true
-          } else {
-            premiumManager.purchasePremium()
-          }
+          #if targetEnvironment(simulator)
+            // In simulator, always use the direct test flow
+            premiumManager.simulatePurchaseForTesting()
+          #else
+            if premiumManager.products.isEmpty {
+              premiumManager.purchaseError = "Cannot connect to App Store. Please try again later."
+              showAlert = true
+            } else {
+              premiumManager.purchasePremium()
+            }
+          #endif
         }) {
           HStack {
             if premiumManager.isLoading {

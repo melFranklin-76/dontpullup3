@@ -495,13 +495,18 @@ struct PremiumUpgradeView: View {
 
           // Purchase button
           Button(action: {
-            if premiumManager.products.isEmpty {
-              premiumManager.purchaseError =
-                "Cannot connect to App Store. Please check your connection or try again later."
-              showPurchaseError = true
-            } else {
-              premiumManager.purchasePremium()
-            }
+            #if targetEnvironment(simulator)
+              // In simulator, always use the test flow regardless of products
+              premiumManager.simulatePurchaseForTesting()
+            #else
+              if premiumManager.products.isEmpty {
+                premiumManager.purchaseError =
+                  "Cannot connect to App Store. Please check your connection or try again later."
+                showPurchaseError = true
+              } else {
+                premiumManager.purchasePremium()
+              }
+            #endif
           }) {
             if premiumManager.isLoading {
               ProgressView()
