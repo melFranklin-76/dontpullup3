@@ -45,10 +45,10 @@ struct PremiumView: View {
 
         // Features list
         VStack(alignment: .leading, spacing: 15) {
-          FeatureRow(icon: "mappin.and.ellipse", text: "View incidents from any location")
-          FeatureRow(icon: "mappin.circle", text: "Change your zip code anytime")
-          FeatureRow(icon: "bell", text: "Get notifications from multiple areas")
-          FeatureRow(icon: "dollarsign.circle", text: "One-time purchase, no subscription")
+          PremiumFeatureRow(icon: "mappin.and.ellipse", text: "View incidents from any location")
+          PremiumFeatureRow(icon: "mappin.circle", text: "Change your zip code anytime")
+          PremiumFeatureRow(icon: "bell", text: "Get notifications from multiple areas")
+          PremiumFeatureRow(icon: "dollarsign.circle", text: "One-time purchase, no subscription")
         }
         .padding(.horizontal, 30)
         .padding(.vertical, 10)
@@ -119,7 +119,7 @@ struct PremiumView: View {
   }
 }
 
-struct FeatureRow: View {
+struct PremiumFeatureRow: View {
   let icon: String
   let text: String
 
