@@ -158,16 +158,17 @@ class MapViewModel: NSObject, ObservableObject {
     print(
       "[MapViewModel] Setting zoom region from \(self.region.span.latitudeDelta) to \(newRegion.span.latitudeDelta)"
     )
-    // Important: Set both region and mapRegion for proper updates
+
+    // Important: Update both properties
     self.region = newRegion
 
-    // Force UI update by explicitly setting a new region
-    DispatchQueue.main.async {
-      self.mapRegion = MKCoordinateRegion(
-        center: newRegion.center,
-        span: newRegion.span
-      )
+    // Use withAnimation to ensure smooth transition
+    withAnimation(.easeInOut(duration: 0.3)) {
+      self.mapRegion = newRegion
     }
+
+    // Post notification for map update
+    NotificationCenter.default.post(name: Notification.Name("MapRegionChanged"), object: nil)
   }
 
   func zoomOut() {
@@ -199,16 +200,17 @@ class MapViewModel: NSObject, ObservableObject {
     print(
       "[MapViewModel] Setting zoom region from \(self.region.span.latitudeDelta) to \(newRegion.span.latitudeDelta)"
     )
-    // Important: Set both region and mapRegion for proper updates
+
+    // Important: Update both properties
     self.region = newRegion
 
-    // Force UI update by explicitly setting a new region
-    DispatchQueue.main.async {
-      self.mapRegion = MKCoordinateRegion(
-        center: newRegion.center,
-        span: newRegion.span
-      )
+    // Use withAnimation to ensure smooth transition
+    withAnimation(.easeInOut(duration: 0.3)) {
+      self.mapRegion = newRegion
     }
+
+    // Post notification for map update
+    NotificationCenter.default.post(name: Notification.Name("MapRegionChanged"), object: nil)
   }
 
   @MainActor
@@ -969,15 +971,18 @@ class MapViewModel: NSObject, ObservableObject {
 
             // Get download URL after successful upload
             storageRef.downloadURL { url, error in
+              // Store the continuation locally to avoid using it in an async context
+              let localContinuation = continuation
+
               if let error = error {
                 print("[MapViewModel] Failed to get download URL: \(error.localizedDescription)")
-                continuation.resume(throwing: error)
+                localContinuation.resume(throwing: error)
                 return
               }
 
               guard let downloadURL = url else {
                 print("[MapViewModel] Download URL is nil")
-                continuation.resume(
+                localContinuation.resume(
                   throwing: NSError(
                     domain: "StorageError", code: -1,
                     userInfo: [NSLocalizedDescriptionKey: "Failed to get download URL"]))
@@ -991,75 +996,86 @@ class MapViewModel: NSObject, ObservableObject {
                 self.uploadProgress = 0.95
               }
 
-              // Get user's current zip code
-              // Get zip code synchronously, as we can't use await in this completion handler
-              var userZipCode = ""
-              // Run a synchronous dispatch to the main thread to get the zip code
-              DispatchQueue.main.sync {
-                userZipCode = self.authManager.currentUserProfile?.zipCode ?? ""
-              }
+              // Get user's current zip code - SAFELY
+              // We need to access MainActor-isolated property in a MainActor context
+              Task { @MainActor in
+                // Get zip code on the main actor
+                let userZipCode = self.authManager.currentUserProfile?.zipCode ?? ""
 
-              // Create pin data
-              let pinData: [String: Any] = [
-                "id": pinId,
-                "latitude": pinCoordinate.latitude,
-                "longitude": pinCoordinate.longitude,
-                "type": incidentType.firestoreType,
-                "videoURL": downloadURL.absoluteString,
-                "userId": currentUserId,
-                "timestamp": FieldValue.serverTimestamp(),
-                "zipCode": userZipCode,  // Add zip code to the pin data
-              ]
+                // Create pin data
+                let pinData: [String: Any] = [
+                  "id": pinId,
+                  "latitude": pinCoordinate.latitude,
+                  "longitude": pinCoordinate.longitude,
+                  "type": incidentType.firestoreType,
+                  "videoURL": downloadURL.absoluteString,
+                  "userId": currentUserId,
+                  "timestamp": FieldValue.serverTimestamp(),
+                  "zipCode": userZipCode,  // Add zip code to the pin data
+                ]
 
-              // Add pin to Firestore
-              let db = Firestore.firestore()
-              db.collection("pins").document(pinId).setData(pinData) { error in
-                if let error = error {
-                  print(
-                    "[MapViewModel] Failed to save pin to Firestore: \(error.localizedDescription)")
-                  // Remove the pin from local array since Firestore save failed
-                  Task { @MainActor in
-                    self.pins.removeAll { $0.id == pinId }
-                    self.activeUploads = max(0, self.activeUploads - 1)
-                    self.uploadProgress = 0
-                  }
-                  continuation.resume(throwing: error)
-                } else {
-                  print("[MapViewModel] Successfully saved pin to Firestore")
+                // Add pin to Firestore
+                let db = Firestore.firestore()
 
-                  // Update the existing pin with video URL
-                  Task { @MainActor in
-                    if let index = self.pins.firstIndex(where: { $0.id == pinId }) {
-                      self.pins[index] = Pin(
-                        id: pinId,
-                        coordinate: pinCoordinate,
-                        incidentType: incidentType,
-                        videoURL: downloadURL.absoluteString,
-                        userId: currentUserId
-                      )
-                      print("[MapViewModel] Updated pin with video URL")
-                    }
+                // Store the continuation outside the Task so we can resume it properly
+                let localContinuation = continuation
 
-                    self.activeUploads = max(0, self.activeUploads - 1)
-                    self.uploadProgress = 1.0
-
-                    // Clear progress after a brief delay
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                db.collection("pins").document(pinId).setData(pinData) { error in
+                  if let error = error {
+                    print(
+                      "[MapViewModel] Failed to save pin to Firestore: \(error.localizedDescription)"
+                    )
+                    // Remove the pin from local array since Firestore save failed
+                    Task { @MainActor in
+                      self.pins.removeAll { $0.id == pinId }
+                      self.activeUploads = max(0, self.activeUploads - 1)
                       self.uploadProgress = 0
                     }
+                    // Resume the continuation outside of Task
+                    localContinuation.resume(throwing: error)
+                  } else {
+                    print("[MapViewModel] Successfully saved pin to Firestore")
 
-                    // Send notifications to users in the same zip code
-                    await self.sendZipCodeNotifications(
-                      for: Pin(
-                        id: pinId,
-                        coordinate: pinCoordinate,
-                        incidentType: incidentType,
-                        videoURL: downloadURL.absoluteString,
-                        userId: currentUserId
-                      ))
+                    // Update the existing pin with video URL
+                    Task { @MainActor in
+                      if let index = self.pins.firstIndex(where: { $0.id == pinId }) {
+                        self.pins[index] = Pin(
+                          id: pinId,
+                          coordinate: pinCoordinate,
+                          incidentType: incidentType,
+                          videoURL: downloadURL.absoluteString,
+                          userId: currentUserId
+                        )
+                        print("[MapViewModel] Updated pin with video URL")
+                      }
+
+                      self.activeUploads = max(0, self.activeUploads - 1)
+                      self.uploadProgress = 1.0
+
+                      // Clear progress after a brief delay
+                      Task {
+                        try? await Task.sleep(nanoseconds: 1_000_000_000)  // 1 second
+
+                        // Ensure we're on the main actor
+                        await MainActor.run {
+                          self.uploadProgress = 0
+                        }
+                      }
+
+                      // Send notifications to users in the same zip code
+                      await self.sendZipCodeNotifications(
+                        for: Pin(
+                          id: pinId,
+                          coordinate: pinCoordinate,
+                          incidentType: incidentType,
+                          videoURL: downloadURL.absoluteString,
+                          userId: currentUserId
+                        ))
+                    }
+
+                    // Resume the continuation outside of Task
+                    localContinuation.resume(returning: ())
                   }
-
-                  continuation.resume(returning: ())
                 }
               }
             }
@@ -1067,6 +1083,9 @@ class MapViewModel: NSObject, ObservableObject {
 
           failureHandle = uploadTask.observe(.failure) { snapshot in
             print("[MapViewModel] Upload task failed")
+
+            // Store the continuation locally to avoid using it in an async context
+            let localContinuation = continuation
 
             // Clean up observers
             if let progressHandle = progressHandle {
@@ -1085,10 +1104,10 @@ class MapViewModel: NSObject, ObservableObject {
 
             if let error = snapshot.error as? NSError {
               print("[MapViewModel] Upload error: \(error.localizedDescription)")
-              continuation.resume(throwing: error)
+              localContinuation.resume(throwing: error)
             } else {
               print("[MapViewModel] Unknown upload error")
-              continuation.resume(
+              localContinuation.resume(
                 throwing: NSError(
                   domain: "StorageError", code: -2,
                   userInfo: [NSLocalizedDescriptionKey: "Unknown upload error"]))

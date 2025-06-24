@@ -497,14 +497,18 @@ struct PremiumUpgradeView: View {
           Button(action: {
             #if targetEnvironment(simulator)
               // In simulator, always use the test flow regardless of products
-              premiumManager.simulatePurchaseForTesting()
+              Task {
+                await premiumManager.simulatePurchaseForTesting()
+              }
             #else
               if premiumManager.products.isEmpty {
                 premiumManager.purchaseError =
                   "Cannot connect to App Store. Please check your connection or try again later."
                 showPurchaseError = true
               } else {
-                premiumManager.purchasePremium()
+                Task {
+                  await premiumManager.purchasePremium()
+                }
               }
             #endif
           }) {
@@ -528,7 +532,9 @@ struct PremiumUpgradeView: View {
 
           // Restore purchases button
           Button(action: {
-            premiumManager.restorePurchases()
+            Task {
+              await premiumManager.restorePurchases()
+            }
           }) {
             Text("Restore Purchases")
               .font(.subheadline)
