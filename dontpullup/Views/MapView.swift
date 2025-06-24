@@ -341,7 +341,7 @@ class Coordinator: NSObject, MKMapViewDelegate {
   func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
     if annotation is MKUserLocation {
       let view = MKUserLocationView(annotation: annotation, reuseIdentifier: "UserLocation")
-      view?.tintColor = UIColor(red: 1.0, green: 0.1, blue: 0.1, alpha: 1.0)
+      view.tintColor = UIColor(red: 1.0, green: 0.1, blue: 0.1, alpha: 1.0)
 
       return view
     }

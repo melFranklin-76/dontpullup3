@@ -1,331 +1,495 @@
 import SwiftUI
 
 struct SettingsView: View {
-    @EnvironmentObject private var authState: AuthState
-    @Environment(\.dismiss) private var dismiss
-    @State private var notificationsEnabled = true
-    @State private var locationTrackingEnabled = true
-    @State private var darkModeEnabled = true
-    @State private var hapticFeedbackEnabled = true
-    @State private var showResetConfirmation = false
-    
-    var body: some View {
-        NavigationView {
-            ZStack {
-                Image("welcome_background")
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .edgesIgnoringSafeArea(.all)
-                
-                Color.black.opacity(0.7)
-                    .edgesIgnoringSafeArea(.all)
-                    
-                VStack {
-                    // Add spacing at the top to prevent crowding with status bar
-                    Spacer()
-                        .frame(height: 16)
-                        
-                    Form {
-                        // Improve section header visibility and spacing
-                        Section(header: 
-                            Text("GENERAL")
-                                .foregroundColor(.white)
-                                .font(.headline)
-                                .padding(.top, 16)
-                                .padding(.bottom, 8)
-                        ) {
-                            // Add more spacing between toggle items
-                            Toggle("Enable Notifications", isOn: $notificationsEnabled)
-                                .toggleStyle(SwitchToggleStyle(tint: .red))
-                                .padding(.vertical, 8)
-                            
-                            Toggle("Location Tracking", isOn: $locationTrackingEnabled)
-                                .toggleStyle(SwitchToggleStyle(tint: .red))
-                                .padding(.vertical, 8)
-                            
-                            Toggle("Dark Mode", isOn: $darkModeEnabled)
-                                .toggleStyle(SwitchToggleStyle(tint: .red))
-                                .disabled(true) // Disabled as app is dark mode only
-                                .padding(.vertical, 8)
-                            
-                            Toggle("Haptic Feedback", isOn: $hapticFeedbackEnabled)
-                                .toggleStyle(SwitchToggleStyle(tint: .red))
-                                .padding(.vertical, 8)
-                            
-                            // Direct way to launch tutorial for testing
-                            Button(action: {
-                                UserDefaults.standard.set(false, forKey: "hasSeenTutorial")
-                                NotificationCenter.default.post(name: Notification.Name("ShowTutorialOverlay"), object: nil)
-                            }) {
-                                Label("Show Tutorial Guide", systemImage: "questionmark.circle")
-                                    .foregroundColor(.blue)
-                            }
-                            .padding(.vertical, 8)
-                        }
-                        
-                        // Improve section header spacing
-                        Section(header: 
-                            Text("APP INFO")
-                                .foregroundColor(.white)
-                                .font(.headline)
-                                .padding(.top, 16)
-                                .padding(.bottom, 8)
-                        ) {
-                            NavigationLink(destination: AboutView()) {
-                                Text("About Don't Pull Up")
-                                    .padding(.vertical, 4)
-                            }
-                            
-                            NavigationLink(destination: PrivacyPolicyView()) {
-                                Text("Privacy Policy")
-                                    .padding(.vertical, 4)
-                            }
-                            
-                            NavigationLink(destination: TermsOfServiceView()) {
-                                Text("Terms of Service")
-                                    .padding(.vertical, 4)
-                            }
-                        }
-                        
-                        Section {
-                            Button(action: {
-                                showResetConfirmation = true
-                            }) {
-                                Text("Reset All Settings")
-                                    .foregroundColor(.red)
-                            }
-                            .padding(.vertical, 4)
-                        }
-                        
-                        Section {
-                            HStack {
-                                Spacer()
-                                VStack(spacing: 8) { // Increased spacing between version texts
-                                    Text("Don't Pull Up")
-                                        .font(.headline)
-                                        .foregroundColor(.gray)
-                                    
-                                    Text("Version 1.0.0 (Build 1)")
-                                        .font(.caption)
-                                        .foregroundColor(.gray)
-                                }
-                                Spacer()
-                            }
-                            .padding(.vertical, 8)
-                        }
-                        .listRowBackground(Color.black)
-                    }
-                    .background(Color.clear)
-                    .hideListBackgroundIfNeeded()
-                    .listStyle(PlainListStyle())
-                }
-                .padding(.top, 16) // Additional padding to prevent crowding with nav bar
+  @EnvironmentObject private var authState: AuthState
+  @Environment(\.dismiss) private var dismiss
+  @State private var notificationsEnabled = true
+  @State private var locationTrackingEnabled = true
+  @State private var darkModeEnabled = true
+  @State private var hapticFeedbackEnabled = true
+  @State private var showResetConfirmation = false
+
+  var body: some View {
+    NavigationView {
+      NoBounceScrollView {
+        VStack(spacing: 20) {
+          // GENERAL section
+          DPUSectionHeader(title: "GENERAL")
+
+          DPUCard {
+            // Add more spacing between toggle items
+            Toggle("Enable Notifications", isOn: $notificationsEnabled)
+              .toggleStyle(SwitchToggleStyle(tint: .red))
+              .padding(.vertical, 10)
+
+            Toggle("Location Tracking", isOn: $locationTrackingEnabled)
+              .toggleStyle(SwitchToggleStyle(tint: .red))
+              .padding(.vertical, 10)
+
+            Toggle("Dark Mode", isOn: $darkModeEnabled)
+              .toggleStyle(SwitchToggleStyle(tint: .red))
+              .disabled(true)  // Disabled as app is dark mode only
+              .padding(.vertical, 10)
+
+            Toggle("Haptic Feedback", isOn: $hapticFeedbackEnabled)
+              .toggleStyle(SwitchToggleStyle(tint: .red))
+              .padding(.vertical, 10)
+
+            // Direct way to launch tutorial for testing
+            Button(action: {
+              UserDefaults.standard.set(false, forKey: "hasSeenTutorial")
+              NotificationCenter.default.post(
+                name: Notification.Name("ShowTutorialOverlay"), object: nil)
+            }) {
+              Label("Show Tutorial Guide", systemImage: "questionmark.circle")
+                .foregroundColor(.blue)
             }
-            .navigationTitle("Settings")
-            .navigationBarTitleDisplayMode(.inline)
-            .alert("Reset Settings", isPresented: $showResetConfirmation) {
-                Button("Cancel", role: .cancel) {}
-                Button("Reset", role: .destructive) {
-                    resetSettings()
+            .padding(.vertical, 10)
+          }
+
+          // APP INFO section
+          DPUSectionHeader(title: "APP INFO")
+
+          DPUCard {
+            VStack(spacing: 8) {
+              NavigationLink(destination: AboutView()) {
+                HStack {
+                  Text("About Don't Pull Up")
+                    .foregroundColor(.white)
+                  Spacer()
+                  Image(systemName: "chevron.right")
+                    .foregroundColor(.gray)
                 }
-            } message: {
-                Text("Are you sure you want to reset all settings to their default values?")
+                .contentShape(Rectangle())
+                .padding(.vertical, 10)
+              }
+
+              Divider().background(Color.gray.opacity(0.3))
+
+              NavigationLink(destination: PrivacyPolicyView()) {
+                HStack {
+                  Text("Privacy Policy")
+                    .foregroundColor(.white)
+                  Spacer()
+                  Image(systemName: "chevron.right")
+                    .foregroundColor(.gray)
+                }
+                .contentShape(Rectangle())
+                .padding(.vertical, 10)
+              }
+
+              Divider().background(Color.gray.opacity(0.3))
+
+              NavigationLink(destination: TermsOfServiceView()) {
+                HStack {
+                  Text("Terms of Service")
+                    .foregroundColor(.white)
+                  Spacer()
+                  Image(systemName: "chevron.right")
+                    .foregroundColor(.gray)
+                }
+                .contentShape(Rectangle())
+                .padding(.vertical, 10)
+              }
             }
+          }
+
+          // RESET section
+          DPUCard {
+            Button(action: {
+              showResetConfirmation = true
+            }) {
+              Text("Reset All Settings")
+                .foregroundColor(.red)
+                .frame(maxWidth: .infinity, alignment: .center)
+            }
+            .padding(.vertical, 10)
+          }
+
+          // VERSION INFO section
+          DPUCard {
+            HStack {
+              Spacer()
+              VStack(spacing: 8) {
+                Text("Don't Pull Up")
+                  .font(.headline)
+                  .foregroundColor(.gray)
+
+                Text("Version 1.0.0 (Build 1)")
+                  .font(.caption)
+                  .foregroundColor(.gray)
+              }
+              Spacer()
+            }
+            .padding(.vertical, 8)
+          }
         }
-        .navigationViewStyle(.stack)
-    }
-    
-    private func resetSettings() {
-        // Reset UI state
-        notificationsEnabled = true
-        locationTrackingEnabled = true
-        darkModeEnabled = true
-        hapticFeedbackEnabled = true
-        
-        // Reset all user defaults related to authentication and tutorial
-        let defaults = UserDefaults.standard
-        defaults.set(false, forKey: "allowAnonymousAccess")
-        defaults.set(true, forKey: "shouldShowInstructions")
-        defaults.set(false, forKey: "hasSeenTutorial")
-        
-        // Notify the app to show tutorial when needed
-        NotificationCenter.default.post(name: Notification.Name("ShowTutorialOverlay"), object: nil)
-        
-        // Reset location permission preferences (this won't affect actual system permissions)
-        defaults.set(false, forKey: "userDeclinedLocationPermissions")
-        
-        // Sign out the user - this will trigger navigation back to the auth screen
-        authState.signOut()
-        
-        // Show confirmation feedback
-        let banner = UINotificationFeedbackGenerator()
-        banner.notificationOccurred(.success)
-        
-        // Dismiss this view after a short delay to allow the haptic feedback to complete
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            // Dismiss the settings view
-            dismiss()
-            
-            // The RootView will automatically show the AuthView since the user is now signed out
+        .padding()
+      }
+      .navigationTitle("Settings")
+      .navigationBarTitleDisplayMode(.inline)
+      .alert("Reset Settings", isPresented: $showResetConfirmation) {
+        Button("Cancel", role: .cancel) {}
+        Button("Reset", role: .destructive) {
+          resetSettings()
         }
+      } message: {
+        Text("Are you sure you want to reset all settings to their default values?")
+      }
     }
+    .navigationViewStyle(.stack)
+  }
+
+  private func resetSettings() {
+    // Reset UI state
+    notificationsEnabled = true
+    locationTrackingEnabled = true
+    darkModeEnabled = true
+    hapticFeedbackEnabled = true
+
+    // Reset all user defaults related to authentication and tutorial
+    let defaults = UserDefaults.standard
+    defaults.set(false, forKey: "allowAnonymousAccess")
+    defaults.set(true, forKey: "shouldShowInstructions")
+    defaults.set(false, forKey: "hasSeenTutorial")
+
+    // Notify the app to show tutorial when needed
+    NotificationCenter.default.post(name: Notification.Name("ShowTutorialOverlay"), object: nil)
+
+    // Reset location permission preferences (this won't affect actual system permissions)
+    defaults.set(false, forKey: "userDeclinedLocationPermissions")
+
+    // Sign out the user - this will trigger navigation back to the auth screen
+    authState.signOut()
+
+    // Show confirmation feedback
+    let banner = UINotificationFeedbackGenerator()
+    banner.notificationOccurred(.success)
+
+    // Dismiss this view after a short delay to allow the haptic feedback to complete
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+      // Dismiss the settings view
+      dismiss()
+
+      // The RootView will automatically show the AuthView since the user is now signed out
+    }
+  }
 }
 
 struct AboutView: View {
-    var body: some View {
-        ZStack {
-            Image("welcome_background")
-                .resizable()
-                .aspectRatio(contentMode: .fill)
-                .edgesIgnoringSafeArea(.all)
-            
-            Color.black.opacity(0.7)
-                .edgesIgnoringSafeArea(.all)
-                
-            ZStack {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
-                        Text("About Don't Pull Up")
-                            .font(.title)
-                            .fontWeight(.bold)
-                            .foregroundColor(.white)
-                        
-                        Text("Don't Pull Up is a community-driven safety app designed to help users identify and avoid potentially unsafe areas. The app allows users to mark locations where incidents have occurred, helping others stay informed and make safer decisions about their travel routes.")
-                            .foregroundColor(.white)
-                        
-                        Text("Our mission is to create a safer community through shared awareness and information. By reporting incidents, you're helping others stay safe.")
-                            .foregroundColor(.white)
-                        
-                        Text("The app is built with privacy in mind. All reports are anonymous by default, and we do not track your location unless you explicitly grant permission.")
-                            .foregroundColor(.white)
-                    }
-                    .padding()
-                }
-            }
-        }
-        .navigationTitle("About")
-        .navigationBarTitleDisplayMode(.inline)
+  var body: some View {
+    NoBounceScrollView {
+      VStack(alignment: .leading, spacing: 20) {
+        Text("About Don't Pull Up")
+          .font(.title)
+          .fontWeight(.bold)
+          .foregroundColor(.white)
+          .padding(.bottom, 8)
+
+        Text(
+          "Don't Pull Up is a community-driven safety app designed to help users identify and avoid potentially unsafe areas. The app allows users to mark locations where incidents have occurred, helping others stay informed and make safer decisions about their travel routes."
+        )
+        .foregroundColor(.white)
+        .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly
+
+        Text(
+          "Our mission is to create a safer community through shared awareness and information. By reporting incidents, you're helping others stay safe."
+        )
+        .foregroundColor(.white)
+        .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly
+
+        Text(
+          "The app is built with privacy in mind. All reports are anonymous by default, and we do not track your location unless you explicitly grant permission."
+        )
+        .foregroundColor(.white)
+        .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly
+
+        // Add more content to ensure scrolling is possible
+        Text("Community Guidelines")
+          .font(.headline)
+          .foregroundColor(.white)
+          .padding(.top, 20)
+          .padding(.bottom, 8)
+
+        Text(
+          "We ask all users to follow our community guidelines when reporting incidents. Please only report actual incidents that you've witnessed or experienced, and provide accurate information. False reports can harm the community and diminish the effectiveness of the app."
+        )
+        .foregroundColor(.white)
+        .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly
+
+        Text("Contact Us")
+          .font(.headline)
+          .foregroundColor(.white)
+          .padding(.top, 20)
+          .padding(.bottom, 8)
+
+        Text(
+          "If you have any questions, concerns, or suggestions about the app, please contact our support team at support@dontpullup.com."
+        )
+        .foregroundColor(.white)
+        .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly
+      }
+      .padding()
     }
+    .navigationTitle("About")
+    .navigationBarTitleDisplayMode(.inline)
+  }
 }
 
 struct PrivacyPolicyView: View {
-    var body: some View {
-        ZStack {
-            Image("welcome_background")
-                .resizable()
-                .aspectRatio(contentMode: .fill)
-                .edgesIgnoringSafeArea(.all)
-            
-            Color.black.opacity(0.7)
-                .edgesIgnoringSafeArea(.all)
-                
-            ZStack {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
-                        Text("Privacy Policy")
-                            .font(.title)
-                            .fontWeight(.bold)
-                            .foregroundColor(.white)
-                        
-                        Text("Last updated: June 2023")
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                        
-                        Text("This Privacy Policy describes how Don't Pull Up collects, uses, and discloses your personal information when you use our mobile application.")
-                            .foregroundColor(.white)
-                        
-                        Group {
-                            Text("Information We Collect")
-                                .font(.headline)
-                                .foregroundColor(.white)
-                            
-                            Text("We may collect certain personal information when you create an account, such as your email address, display name, and general location. We also collect information about the incidents you report, including location data and incident type.")
-                                .foregroundColor(.white)
-                        }
-                        
-                        Group {
-                            Text("How We Use Your Information")
-                                .font(.headline)
-                                .foregroundColor(.white)
-                            
-                            Text("We use the information we collect to provide, maintain, and improve our services, to communicate with you, and to protect our users and the public.")
-                                .foregroundColor(.white)
-                        }
-                    }
-                    .padding()
-                }
-            }
+  var body: some View {
+    NoBounceScrollView {
+      VStack(alignment: .leading, spacing: 20) {
+        Text("Privacy Policy")
+          .font(.title)
+          .fontWeight(.bold)
+          .foregroundColor(.white)
+
+        Text("Last updated: June 2023")
+          .font(.caption)
+          .foregroundColor(.gray)
+
+        Text(
+          "This Privacy Policy describes how Don't Pull Up collects, uses, and discloses your personal information when you use our mobile application."
+        )
+        .foregroundColor(.white)
+        .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly
+
+        Group {
+          Text("Information We Collect")
+            .font(.headline)
+            .foregroundColor(.white)
+            .padding(.top, 10)
+
+          Text(
+            "We may collect certain personal information when you create an account, such as your email address, display name, and general location. We also collect information about the incidents you report, including location data and incident type."
+          )
+          .foregroundColor(.white)
+          .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly
         }
-        .navigationTitle("Privacy Policy")
-        .navigationBarTitleDisplayMode(.inline)
+
+        Group {
+          Text("How We Use Your Information")
+            .font(.headline)
+            .foregroundColor(.white)
+            .padding(.top, 10)
+
+          Text(
+            "We use the information we collect to provide, maintain, and improve our services, to communicate with you, and to protect our users and the public."
+          )
+          .foregroundColor(.white)
+          .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly
+        }
+
+        Group {
+          Text("Information Sharing")
+            .font(.headline)
+            .foregroundColor(.white)
+            .padding(.top, 10)
+
+          Text(
+            "We may share information about reported incidents with other users of the app to help them stay informed and make safer decisions. We will not share your personal information with third parties without your consent, except as required by law."
+          )
+          .foregroundColor(.white)
+          .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly
+        }
+
+        Group {
+          Text("Data Security")
+            .font(.headline)
+            .foregroundColor(.white)
+            .padding(.top, 10)
+
+          Text(
+            "We take reasonable measures to protect your personal information from unauthorized access, use, or disclosure. However, no method of transmission over the internet or electronic storage is 100% secure."
+          )
+          .foregroundColor(.white)
+          .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly
+        }
+
+        Group {
+          Text("Your Rights")
+            .font(.headline)
+            .foregroundColor(.white)
+            .padding(.top, 10)
+
+          Text(
+            "You have the right to access, correct, or delete your personal information. You can also opt out of receiving communications from us at any time."
+          )
+          .foregroundColor(.white)
+          .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly
+        }
+
+        Group {
+          Text("Changes to This Privacy Policy")
+            .font(.headline)
+            .foregroundColor(.white)
+            .padding(.top, 10)
+
+          Text(
+            "We may update our Privacy Policy from time to time. We will notify you of any changes by posting the new Privacy Policy on this page and updating the 'Last updated' date."
+          )
+          .foregroundColor(.white)
+          .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly
+        }
+
+        Group {
+          Text("Contact Us")
+            .font(.headline)
+            .foregroundColor(.white)
+            .padding(.top, 10)
+
+          Text(
+            "If you have any questions about this Privacy Policy, please contact us at privacy@dontpullup.com."
+          )
+          .foregroundColor(.white)
+          .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly
+        }
+      }
+      .padding()
     }
+    .navigationTitle("Privacy Policy")
+    .navigationBarTitleDisplayMode(.inline)
+  }
 }
 
 struct TermsOfServiceView: View {
-    var body: some View {
-        ZStack {
-            Image("welcome_background")
-                .resizable()
-                .aspectRatio(contentMode: .fill)
-                .edgesIgnoringSafeArea(.all)
-            
-            Color.black.opacity(0.7)
-                .edgesIgnoringSafeArea(.all)
-                
-            ZStack {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
-                        Text("Terms of Service")
-                            .font(.title)
-                            .fontWeight(.bold)
-                            .foregroundColor(.white)
-                        
-                        Text("Last updated: June 2023")
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                        
-                        Text("By downloading, installing, or using Don't Pull Up, you agree to be bound by these Terms of Service. If you do not agree to these terms, you may not use the app.")
-                            .foregroundColor(.white)
-                        
-                        Group {
-                            Text("User Content")
-                                .font(.headline)
-                                .foregroundColor(.white)
-                            
-                            Text("Users are responsible for the content they submit to the app. You agree not to submit false or misleading information, or content that is offensive, harmful, or violates the rights of others.")
-                                .foregroundColor(.white)
-                        }
-                        
-                        Group {
-                            Text("Use of the Service")
-                                .font(.headline)
-                                .foregroundColor(.white)
-                            
-                            Text("The app is intended to be used for informational purposes only. Don't Pull Up is not responsible for any actions taken based on the information provided through the app.")
-                                .foregroundColor(.white)
-                        }
-                    }
-                    .padding()
-                }
-            }
+  var body: some View {
+    NoBounceScrollView {
+      VStack(alignment: .leading, spacing: 20) {
+        Text("Terms of Service")
+          .font(.title)
+          .fontWeight(.bold)
+          .foregroundColor(.white)
+
+        Text("Last updated: June 2023")
+          .font(.caption)
+          .foregroundColor(.gray)
+
+        Text(
+          "By downloading, installing, or using Don't Pull Up, you agree to be bound by these Terms of Service. If you do not agree to these terms, you may not use the app."
+        )
+        .foregroundColor(.white)
+        .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly
+
+        Group {
+          Text("User Content")
+            .font(.headline)
+            .foregroundColor(.white)
+            .padding(.top, 10)
+
+          Text(
+            "Users are responsible for the content they submit to the app. You agree not to submit false or misleading information, or content that is offensive, harmful, or violates the rights of others."
+          )
+          .foregroundColor(.white)
+          .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly
         }
-        .navigationTitle("Terms of Service")
-        .navigationBarTitleDisplayMode(.inline)
+
+        Group {
+          Text("Use of the Service")
+            .font(.headline)
+            .foregroundColor(.white)
+            .padding(.top, 10)
+
+          Text(
+            "The app is intended to be used for informational purposes only. Don't Pull Up is not responsible for any actions taken based on the information provided through the app."
+          )
+          .foregroundColor(.white)
+          .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly
+        }
+
+        Group {
+          Text("User Accounts")
+            .font(.headline)
+            .foregroundColor(.white)
+            .padding(.top, 10)
+
+          Text(
+            "You are responsible for maintaining the confidentiality of your account credentials and for all activities that occur under your account. You agree to notify us immediately of any unauthorized use of your account."
+          )
+          .foregroundColor(.white)
+          .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly
+        }
+
+        Group {
+          Text("Intellectual Property")
+            .font(.headline)
+            .foregroundColor(.white)
+            .padding(.top, 10)
+
+          Text(
+            "All content and materials available in the app, including but not limited to text, graphics, logos, icons, images, audio clips, and software, are the property of Don't Pull Up or its licensors and are protected by copyright, trademark, and other intellectual property laws."
+          )
+          .foregroundColor(.white)
+          .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly
+        }
+
+        Group {
+          Text("Limitation of Liability")
+            .font(.headline)
+            .foregroundColor(.white)
+            .padding(.top, 10)
+
+          Text(
+            "In no event shall Don't Pull Up be liable for any indirect, incidental, special, consequential, or punitive damages, including without limitation, loss of profits, data, use, goodwill, or other intangible losses, resulting from your access to or use of or inability to access or use the app."
+          )
+          .foregroundColor(.white)
+          .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly
+        }
+
+        Group {
+          Text("Changes to Terms")
+            .font(.headline)
+            .foregroundColor(.white)
+            .padding(.top, 10)
+
+          Text(
+            "We reserve the right to modify or replace these Terms of Service at any time. If a revision is material, we will provide at least 30 days' notice prior to any new terms taking effect."
+          )
+          .foregroundColor(.white)
+          .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly
+        }
+
+        Group {
+          Text("Contact Us")
+            .font(.headline)
+            .foregroundColor(.white)
+            .padding(.top, 10)
+
+          Text(
+            "If you have any questions about these Terms of Service, please contact us at terms@dontpullup.com."
+          )
+          .foregroundColor(.white)
+          .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly
+        }
+      }
+      .padding()
     }
+    .navigationTitle("Terms of Service")
+    .navigationBarTitleDisplayMode(.inline)
+  }
 }
 
 #Preview {
-    SettingsView()
-        .environmentObject(AuthState.shared)
+  SettingsView()
+    .environmentObject(AuthState.shared)
 }
 
 extension View {
-    @ViewBuilder
-    func hideListBackgroundIfNeeded() -> some View {
-        if #available(iOS 16.0, *) {
-            self.scrollContentBackground(.hidden)
-        } else {
-            self
-        }
+  @ViewBuilder
+  func hideListBackgroundIfNeeded() -> some View {
+    if #available(iOS 16.0, *) {
+      self.scrollContentBackground(.hidden)
+    } else {
+      // For iOS versions below 16.0, we need an alternative approach
+      self.onAppear {
+        // This modifies the UITableView background for iOS 15 and below
+        UITableView.appearance().backgroundColor = .clear
+      }
+      .onDisappear {
+        // Reset when view disappears
+        UITableView.appearance().backgroundColor = .systemGroupedBackground
+      }
     }
-} 
+  }
+}

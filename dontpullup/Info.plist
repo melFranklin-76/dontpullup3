@@ -8,10 +8,14 @@
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.dontpullup</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>FirebaseAppDelegateProxyEnabled</key>
+	<true/>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>LSRequiresIPhoneOS</key>
@@ -37,6 +41,8 @@
 	<string>Microphone access is needed for video recording. You are responsible for any audio recorded. By recording audio, you confirm you have the right to record and accept responsibility for its contents.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Photo library access is needed to upload incident videos. You are solely responsible for the content you upload. By uploading content, you confirm you have the right to share it and accept responsibility for its contents.</string>
+	<key>NSUserNotificationUsageDescription</key>
+	<string>Notifications are used to alert you when incidents are reported in your zip code area. This helps keep your community informed about nearby safety concerns.</string>
 	<key>UIAppFonts</key>
 	<array>
 		<string>Gagalin-Regular.otf</string>
@@ -59,6 +65,11 @@
 			</array>
 		</dict>
 	</dict>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+		<string>fetch</string>
+	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UIRequiredDeviceCapabilities</key>
@@ -72,7 +83,5 @@
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
 	</array>
-	<key>FirebaseAppDelegateProxyEnabled</key>
-	<true/>
 </dict>
 </plist>

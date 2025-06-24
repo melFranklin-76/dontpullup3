@@ -1,0 +1,61 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Users collection rules
+    match /users/{userId} {
+      // Allow users to read and write their own profile
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+      
+      // Allow creating user profiles during registration
+      allow create: if request.auth != null 
+        && request.auth.uid == userId
+        && request.resource.data.keys().hasAll(['id', 'email', 'zipCode'])
+        && request.resource.data.id == userId;
+      
+      // Allow reading users for notification purposes
+      // Users can read other users' profiles if they're in the same zip code
+      allow read: if request.auth != null 
+        && request.auth.uid != userId
+        && resource.data.zipCode == getUserZipCode(request.auth.uid);
+        
+      // Allow querying users collection for notification system
+      allow list: if request.auth != null;
+    }
+    
+    // Pins collection rules  
+    match /pins/{pinId} {
+      // Allow authenticated users to read all pins
+      allow read: if request.auth != null;
+      
+      // Allow authenticated users to create pins with proper data
+      allow create: if request.auth != null
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.keys().hasAll(['latitude', 'longitude', 'type', 'userId', 'timestamp']);
+      
+      // Allow users to update their own pins (for adding video URLs)
+      allow update: if request.auth != null 
+        && resource.data.userId == request.auth.uid
+        && request.resource.data.userId == request.auth.uid;
+      
+      // Allow users to delete their own pins
+      allow delete: if request.auth != null 
+        && resource.data.userId == request.auth.uid;
+    }
+    
+    // Flagged videos collection (for reporting)
+    match /flaggedVideos/{reportId} {
+      // Allow authenticated users to create reports
+      allow create: if request.auth != null
+        && request.resource.data.keys().hasAll(['email', 'reason', 'videoId', 'timestamp']);
+      
+      // Only admins can read reports (you'll need to implement admin checking)
+      allow read: if false; // TODO: Add admin role checking
+    }
+    
+    // Helper function to get user's zip code
+    function getUserZipCode(uid) {
+      return get(/databases/$(database)/documents/users/$(uid)).data.zipCode;
+    }
+  }
+} 

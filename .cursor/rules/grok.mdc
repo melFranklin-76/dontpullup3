@@ -1,0 +1,66 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+Instructions for Cursor: File Search and Duplicate Prevention
+To ensure efficient file handling and prevent the creation of duplicate files, please follow these guidelines when searching for or creating files:
+1. Search the Root Folder and Subdirectories
+
+Action: Before creating a new file or modifying an existing one, perform a comprehensive search within the root folder and all its subdirectories.
+Purpose: Identify any existing files that may contain relevant information or serve the same purpose as the file being requested.
+Search Criteria:
+Look for files with similar names, content, or functionality based on the user's request.
+Check file extensions relevant to the task (e.g., .py, .js, .md, .html, etc.).
+Analyze file content for keywords, functions, or patterns that match the user's intent.
+
+
+
+2. Prevent Duplicate File Creation
+
+Action: If a file with similar content or purpose is found, do not create a new file. Instead:
+Inform: Notify the user about the existing file(s) and their location(s).
+Suggest: Propose modifying the existing file or confirm with the user if a new file is necessary.
+
+
+Duplicate Check:
+Compare the proposed file's name, structure, or content with existing files.
+Avoid creating files with identical or near-identical names (e.g., script.py vs. script1.py) unless explicitly requested.
+
+
+Depth: Ensure the search is recursive and covers all nested folders within the project root.
+
+3. Best Practices for File Creation
+
+If no relevant file is found after a thorough search:
+Create the new file in the appropriate directory based on the project structure (e.g., place Python scripts in a src/ folder if that’s the convention).
+Use descriptive, unique file names to avoid future conflicts.
+
+
+If modifying an existing file:
+Preserve the file’s existing structure and content unless changes are explicitly requested.
+Apply changes incrementally to avoid overwriting unrelated content.
+
+
+
+4. Example Workflow
+
+User Request: "Create a Python script for a login function."
+Search:
+Scan the root folder and subdirectories for files like login.py, auth.py, or any file containing login-related code.
+Example: Check for keywords like login, authenticate, or user in .py files.
+
+Outcome:
+If src/auth.py exists and contains a login function, suggest editing it.
+If no relevant file is found, create src/login.py with the requested functionality.
+
+
+Notify: Inform the user of the action taken (e.g., "Found existing auth.py at src/auth.py. Updated it with the login function." or "Created new file src/login.py").
+
+5. Configuration Tips
+
+Root Folder: Always start the search from the project’s root folder (e.g., /project/ or the directory where the IDE is initialized).
+Ignore Patterns: Exclude irrelevant directories like node_modules/, .git/, or dist/ to optimize the search.
+File History: Maintain a lightweight index or cache of recently accessed files to speed up searches (if supported).
+
+By following these guidelines, Cursor can minimize duplicate files, respect the project’s structure, and provide a seamless coding experience.

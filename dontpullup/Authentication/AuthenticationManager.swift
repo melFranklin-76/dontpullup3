@@ -1,15 +1,18 @@
 @preconcurrency import FirebaseAuth
 import FirebaseFirestore
 import Combine
+import FirebaseMessaging
 
 @MainActor
 final class AuthenticationManager: ObservableObject {
     @Published var currentUser: User?
+    @Published var currentUserProfile: UserProfile?
     @Published var isAuthenticated = false
     @Published var errorMessage: String?
     
     static let shared = AuthenticationManager()
     private var handle: AuthStateDidChangeListenerHandle?
+    private let db = Firestore.firestore()
     
     init() {
         setupAuthStateListener()
@@ -20,6 +23,14 @@ final class AuthenticationManager: ObservableObject {
             Task { @MainActor in
                 self?.currentUser = user
                 self?.isAuthenticated = user != nil
+                
+                // Load user profile if user exists
+                if let user = user {
+                    await self?.loadUserProfile(userId: user.uid)
+                } else {
+                    self?.currentUserProfile = nil
+                }
+                
                 print("AuthenticationManager: Auth state changed - User: \(user?.uid ?? "none")")
             }
         }
@@ -30,18 +41,28 @@ final class AuthenticationManager: ObservableObject {
         self.currentUser = result.user
         self.isAuthenticated = true
         self.errorMessage = nil
+        
+        // Load user profile
+        await loadUserProfile(userId: result.user.uid)
+        
         print("AuthenticationManager: Sign in successful - User: \(result.user.uid)")
     }
     
-    func signUp(email: String, password: String) async throws {
+    func signUp(email: String, password: String, zipCode: String) async throws {
         let result = try await Auth.auth().createUser(withEmail: email, password: password)
         self.currentUser = result.user
         self.isAuthenticated = true
         self.errorMessage = nil
         print("AuthenticationManager: Sign up successful - User: \(result.user.uid)")
         
-        // Create user document in Firestore
-        try await createUserProfile(for: result.user)
+        // Create user profile in Firestore with zip code
+        try await createUserProfile(for: result.user, email: email, zipCode: zipCode)
+    }
+    
+    // Legacy signUp method for backward compatibility - will prompt for zip code
+    func signUp(email: String, password: String) async throws {
+        // For now, use a default zip code or throw an error
+        throw NSError(domain: "AuthenticationManager", code: 1, userInfo: [NSLocalizedDescriptionKey: "Zip code is required for registration"])
     }
     
     func signInAnonymously() async throws {
@@ -51,8 +72,24 @@ final class AuthenticationManager: ObservableObject {
         self.errorMessage = nil
         print("AuthenticationManager: Anonymous sign in successful - User: \(result.user.uid)")
         
-        // Create anonymous user profile
-        try await createUserProfile(for: result.user)
+        // Create anonymous user profile (no email or zip code)
+        try await createAnonymousUserProfile(for: result.user)
+    }
+    
+    private func createAnonymousUserProfile(for user: User) async throws {
+        let userRef = db.collection("users").document(user.uid)
+        
+        let userData: [String: Any] = [
+            "uid": user.uid,
+            "email": "",
+            "isAnonymous": true,
+            "createdAt": FieldValue.serverTimestamp(),
+            "lastLogin": FieldValue.serverTimestamp(),
+            "zipCode": "" // Empty zip code for anonymous users
+        ]
+        
+        try await userRef.setData(userData, merge: true)
+        print("AuthenticationManager: Anonymous user profile created in Firestore - User: \(user.uid)")
     }
     
     func signOut() throws {
@@ -63,20 +100,210 @@ final class AuthenticationManager: ObservableObject {
         print("AuthenticationManager: Sign out successful")
     }
     
-    private func createUserProfile(for user: User) async throws {
-        let db = Firestore.firestore()
-        let userRef = db.collection("users").document(user.uid)
+    private func createUserProfile(for user: User, email: String, zipCode: String) async throws {
+        // Create UserProfile object
+        let userProfile = UserProfile(id: user.uid, email: email, zipCode: zipCode)
         
-        let userData: [String: Any] = [
-            "uid": user.uid,
-            "email": user.email ?? "",
-            "isAnonymous": user.isAnonymous,
-            "createdAt": FieldValue.serverTimestamp(),
-            "lastLogin": FieldValue.serverTimestamp()
-        ]
+        // Save to Firestore
+        try await db.collection("users").document(user.uid).setData(userProfile.toFirestoreData())
         
-        try await userRef.setData(userData, merge: true)
-        print("AuthenticationManager: User profile created in Firestore - User: \(user.uid)")
+        // Update local profile
+        self.currentUserProfile = userProfile
+        
+        print("AuthenticationManager: User profile created in Firestore - User: \(user.uid), ZipCode: \(zipCode)")
+    }
+
+    
+    private func loadUserProfile(userId: String) async {
+        do {
+            let document = try await db.collection("users").document(userId).getDocument()
+            
+            if document.exists, let data = document.data() {
+                if let profile = UserProfile.fromFirestoreData(id: userId, data: data) {
+                    self.currentUserProfile = profile
+                    print("AuthenticationManager: User profile loaded - User: \(userId), ZipCode: \(profile.zipCode)")
+                    
+                    // FIXED: Update FCM token if missing in the loaded profile
+                    if profile.fcmToken == nil || profile.fcmToken?.isEmpty == true {
+                        print("AuthenticationManager: FCM token missing, requesting update from AppDelegate")
+                        // Request current token from Messaging
+                        Task {
+                            if let token = Messaging.messaging().fcmToken {
+                                print("AuthenticationManager: Retrieved current FCM token, updating profile")
+                                await updateFCMToken(token)
+                            }
+                        }
+                    }
+                } else {
+                    print("AuthenticationManager: Failed to parse user profile data")
+                }
+            } else {
+                print("AuthenticationManager: User profile document not found")
+                // For existing users without profiles, create one with a default zip code
+                await createMissingUserProfile(userId: userId)
+            }
+        } catch {
+            print("AuthenticationManager: Error loading user profile: \(error.localizedDescription)")
+        }
+    }
+    
+    /// Creates a user profile for existing users who don't have one
+    private func createMissingUserProfile(userId: String) async {
+        guard let user = currentUser else { return }
+        
+        // Use a default zip code (you can change this later in profile settings)
+        let defaultZipCode = "10001" // Default to NYC zip code
+        let email = user.email ?? ""
+        
+        print("AuthenticationManager: Creating missing profile for existing user: \(userId)")
+        
+        do {
+            // FIXED: Get current FCM token to include in the new profile
+            let fcmToken = Messaging.messaging().fcmToken
+            
+            // Create user profile with the current FCM token
+            let userProfile = UserProfile(id: userId, email: email, zipCode: defaultZipCode, fcmToken: fcmToken)
+            
+            // Save to Firestore
+            try await db.collection("users").document(userId).setData(userProfile.toFirestoreData())
+            
+            // Update local profile
+            self.currentUserProfile = userProfile
+            
+            print("AuthenticationManager: Successfully created missing profile with default zip code: \(defaultZipCode) and FCM token: \(fcmToken ?? "none")")
+        } catch {
+            print("AuthenticationManager: Error creating missing profile: \(error.localizedDescription)")
+        }
+    }
+    
+    func updateFCMToken(_ token: String) async {
+        guard let userId = currentUser?.uid else {
+            print("AuthenticationManager: Cannot update FCM token - no current user")
+            return
+        }
+        
+        do {
+            print("AuthenticationManager: Updating FCM token to: \(token.prefix(8))...")
+            
+            // Update FCM token in Firestore
+            try await db.collection("users").document(userId).updateData(["fcmToken": token])
+            
+            // Update local profile
+            if currentUserProfile != nil {
+            currentUserProfile?.updateFCMToken(token)
+            } else {
+                print("AuthenticationManager: Creating profile since none exists during FCM update")
+                await loadUserProfile(userId: userId)
+            }
+            
+            print("AuthenticationManager: FCM token updated for user: \(userId)")
+        } catch {
+            print("AuthenticationManager: Error updating FCM token: \(error.localizedDescription)")
+            
+            // If the document doesn't exist, create it
+            if let nsError = error as NSError?, nsError.domain == FirestoreErrorDomain, nsError.code == 5 {
+                print("AuthenticationManager: User document doesn't exist, creating it")
+                await createMissingUserProfile(userId: userId)
+            }
+        }
+    }
+    
+    /// Updates the user's zip code for notifications
+    func updateZipCode(_ newZipCode: String) async throws {
+        guard let userId = currentUser?.uid else {
+            throw NSError(domain: "AuthenticationManager", code: -1,
+                         userInfo: [NSLocalizedDescriptionKey: "No user is currently signed in"])
+        }
+        
+        do {
+            // Update zip code in Firestore
+            try await db.collection("users").document(userId).updateData(["zipCode": newZipCode])
+            
+            // Update local profile
+            if var profile = currentUserProfile {
+                profile = UserProfile(
+                    id: profile.id,
+                    email: profile.email,
+                    zipCode: newZipCode,
+                    fcmToken: profile.fcmToken,
+                    createdAt: profile.createdAt,
+                    lastActive: Date()
+                )
+                self.currentUserProfile = profile
+            }
+            
+            print("AuthenticationManager: Zip code updated to: \(newZipCode)")
+        } catch {
+            print("AuthenticationManager: Error updating zip code: \(error.localizedDescription)")
+            throw error
+        }
+    }
+    
+    /// Completely deletes user account and all associated data
+    /// This satisfies Apple's requirement for complete account deletion
+    func deleteAccount() async throws {
+        guard let user = currentUser else {
+            throw NSError(domain: "AuthenticationManager", code: -1, 
+                         userInfo: [NSLocalizedDescriptionKey: "No user is currently signed in"])
+        }
+        
+        let userId = user.uid
+        print("AuthenticationManager: Starting complete account deletion for user: \(userId)")
+        
+        // Step 1: Delete all user's pins from Firestore
+        do {
+            let pinsSnapshot = try await db.collection("pins")
+                .whereField("userId", isEqualTo: userId)
+                .getDocuments()
+            
+            for document in pinsSnapshot.documents {
+                try await document.reference.delete()
+                print("AuthenticationManager: Deleted pin: \(document.documentID)")
+            }
+            print("AuthenticationManager: Deleted \(pinsSnapshot.documents.count) user pins")
+        } catch {
+            print("AuthenticationManager: Error deleting user pins: \(error)")
+            // Continue with deletion even if pins can't be deleted
+        }
+        
+        // Step 2: Delete any flagged video reports by this user
+        do {
+            let reportsSnapshot = try await db.collection("flaggedVideos")
+                .whereField("email", isEqualTo: user.email ?? "")
+                .getDocuments()
+            
+            for document in reportsSnapshot.documents {
+                try await document.reference.delete()
+                print("AuthenticationManager: Deleted report: \(document.documentID)")
+            }
+            print("AuthenticationManager: Deleted \(reportsSnapshot.documents.count) user reports")
+        } catch {
+            print("AuthenticationManager: Error deleting user reports: \(error)")
+            // Continue with deletion
+        }
+        
+        // Step 3: Delete user profile from Firestore
+        do {
+            try await db.collection("users").document(userId).delete()
+            print("AuthenticationManager: Deleted user profile from Firestore")
+        } catch {
+            print("AuthenticationManager: Error deleting user profile: \(error)")
+            // Continue with deletion
+        }
+        
+        // Step 4: Delete Firebase Auth account
+        try await user.delete()
+        print("AuthenticationManager: Deleted Firebase Auth account")
+        
+        // Step 5: Clear local state
+        await MainActor.run {
+            self.currentUser = nil
+            self.currentUserProfile = nil
+            self.isAuthenticated = false
+            self.errorMessage = nil
+        }
+        
+        print("AuthenticationManager: Account deletion completed successfully")
     }
     
     deinit {

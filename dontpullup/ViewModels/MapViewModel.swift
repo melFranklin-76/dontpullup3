@@ -652,23 +652,24 @@ class MapViewModel: NSObject, ObservableObject {
   }
 
   // MARK: - Initialization
-  init(authState: AuthState) {  // Updated initializer
+  init(authState: AuthState) {
     self.authState = authState
     super.init()
+
+    // Set up location manager
     locationManager.delegate = self
     locationManager.desiredAccuracy = kCLLocationAccuracyBest
+    locationManager.distanceFilter = 10  // Update when user moves 10 meters
 
+    // Set up notification observer for upload progress
     NotificationCenter.default.addObserver(
       self,
-      selector: #selector(handleAppDidBecomeActive),
-      name: .appDidBecomeActiveForLocationCheck,
+      selector: #selector(updateUploadProgress),
+      name: Notification.Name("UploadProgressUpdated"),
       object: nil
     )
-    print(
-      "[MapViewModel] Initialized and subscribed to appDidBecomeActiveForLocationCheck notification."
-    )
 
-    // Perform the initial CoreLocation status check off the main thread
+    // Initialize location status
     Task {
       await checkInitialLocationStatus()
     }
@@ -682,11 +683,22 @@ class MapViewModel: NSObject, ObservableObject {
   }
 
   deinit {
+    // Remove notification observers
     NotificationCenter.default.removeObserver(
       self, name: .appDidBecomeActiveForLocationCheck, object: nil)
+    NotificationCenter.default.removeObserver(
+      self, name: Notification.Name("UploadProgressUpdated"), object: nil)
     print(
-      "[MapViewModel] Deinitialized and unsubscribed from appDidBecomeActiveForLocationCheck notification."
+      "[MapViewModel] Deinitialized and unsubscribed from notifications."
     )
+  }
+
+  @objc private func updateUploadProgress(notification: Notification) {
+    if let progress = notification.userInfo?["progress"] as? Double {
+      Task { @MainActor in
+        self.uploadProgress = progress / 100.0
+      }
+    }
   }
 
   @objc private func handleAppDidBecomeActive() {

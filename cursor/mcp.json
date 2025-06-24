@@ -19,6 +19,16 @@
       "name": "Video Metadata Validator",
       "glob": "**/*.swift",
       "command": "python3 .cursor/video_metadata_check.py"
+    },
+    {
+      "name": "Dependency Inspector",
+      "glob": "**/*.swift",
+      "command": "python3 .cursor/dependency_inspector.py --config dependencies.json"
+    },
+    {
+      "name": "Cross-file Dependency Test",
+      "glob": "**/*.swift",
+      "command": "bash .cursor/test_dependency_checker.sh"
     }
   ]
-}
+} 

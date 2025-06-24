@@ -7,9 +7,12 @@ struct MapContentWrapper: View {
     
     var body: some View {
         ZStack {
-            // Main MapView
-            MapView(viewModel: viewModel)
-                .edgesIgnoringSafeArea(.all)
+            // Main MapView with report sheet functionality
+            MapViewWithReportSheet(
+                viewModel: viewModel,
+                region: $viewModel.region
+            )
+            .edgesIgnoringSafeArea(.all)
             
             // Upload progress overlay
             if viewModel.uploadProgress > 0 && viewModel.uploadProgress < 1.0 {

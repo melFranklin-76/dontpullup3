@@ -129,6 +129,33 @@ class AuthState: ObservableObject {
         }
     }
 
+    func signUp(email: String, password: String, zipCode: String, completion: @escaping (Result<User, Error>) -> Void) {
+        authLogger.info("Creating new account with zip code...")
+        Task {
+            do {
+                try await AuthenticationManager.shared.signUp(email: email, password: password, zipCode: zipCode)
+                
+                // Show instructions for new users
+                await MainActor.run {
+                    self.shouldShowInstructions = true
+                    UserDefaults.standard.set(true, forKey: "shouldShowInstructions")
+                }
+                
+                authLogger.info("Account creation successful")
+                if let user = Auth.auth().currentUser {
+                    completion(.success(user))
+                } else {
+                    let error = NSError(domain: "AuthState", code: -1, userInfo: [NSLocalizedDescriptionKey: "User is nil after sign up"])
+                    completion(.failure(error))
+                }
+            } catch {
+                authLogger.error("Account creation failed: \(error.localizedDescription)")
+                completion(.failure(error))
+            }
+        }
+    }
+
+    // Legacy signUp method for backward compatibility
     func signUp(email: String, password: String, completion: @escaping (Result<User, Error>) -> Void) {
         authLogger.info("Creating new account...")
         Auth.auth().createUser(withEmail: email, password: password) { authResult, error in

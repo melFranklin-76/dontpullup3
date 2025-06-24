@@ -11,58 +11,69 @@ struct IncidentTypePicker: View {
   @State private var showMediaOptions = false
 
   var body: some View {
-    ZStack {
-      // Background black with slight transparency
-      Color.black.opacity(0.9)
-        .edgesIgnoringSafeArea(.all)
-
+    NoBounceScrollView {
       VStack(spacing: 24) {
         Text("Select Incident Type")
           .font(.title)
           .fontWeight(.bold)
           .foregroundColor(.white)
           .padding(.top, 24)
+          .padding(.bottom, 8)
 
-        ForEach(IncidentType.allCases, id: \.self) { type in
-          Button(action: {
-            selectedType = type
-            // Show media options sheet instead of immediately presenting picker
-            showMediaOptions = true
-          }) {
-            HStack {
-              Text(type.emoji)
-                .font(.system(size: 36))
+        // Incident type buttons with improved spacing
+        VStack(spacing: 16) {
+          ForEach(IncidentType.allCases, id: \.self) { type in
+            DPUCard(backgroundColor: Color.black.opacity(0.6)) {
+              Button(action: {
+                selectedType = type
+                // Show media options sheet instead of immediately presenting picker
+                showMediaOptions = true
+              }) {
+                HStack {
+                  Text(type.emoji)
+                    .font(.system(size: 36))
+                    .frame(width: 60)
 
-              VStack(alignment: .leading) {
-                Text(type.title)
-                  .font(.headline)
-                  .foregroundColor(.white)
+                  VStack(alignment: .leading, spacing: 4) {
+                    Text(type.title)
+                      .font(.headline)
+                      .foregroundColor(.white)
 
-                Text(type.description)
-                  .font(.subheadline)
-                  .foregroundColor(.gray)
+                    Text(type.description)
+                      .font(.subheadline)
+                      .foregroundColor(.gray)
+                      .fixedSize(horizontal: false, vertical: true)
+                  }
+                  .padding(.vertical, 8)
+
+                  Spacer()
+
+                  Image(systemName: "chevron.right")
+                    .foregroundColor(.gray)
+                    .padding(.trailing, 8)
+                }
+                .contentShape(Rectangle())
               }
-
-              Spacer()
-
-              Image(systemName: "chevron.right")
-                .foregroundColor(.gray)
+              .buttonStyle(PlainButtonStyle())
             }
-            .padding()
-            .background(Color.black.opacity(0.6))
-            .cornerRadius(12)
           }
         }
 
-        Spacer()
+        Spacer(minLength: 40)
 
-        Button("Cancel") {
-          presentationMode.wrappedValue.dismiss()
+        DPUCard(backgroundColor: Color.black.opacity(0.6)) {
+          Button(action: {
+            presentationMode.wrappedValue.dismiss()
+          }) {
+            Text("Cancel")
+              .font(.headline)
+              .foregroundColor(.red)
+              .frame(maxWidth: .infinity)
+              .padding(.vertical, 10)
+          }
         }
-        .foregroundColor(.red)
-        .padding(.bottom, 32)
       }
-      .padding(.horizontal)
+      .padding(.horizontal, 16)
     }
     .actionSheet(isPresented: $showMediaOptions) {
       ActionSheet(
@@ -70,7 +81,7 @@ struct IncidentTypePicker: View {
         message: Text("Choose a video source"),
         buttons: [
           .default(Text("Choose from Library")) {
-            if let type = selectedType {
+            if selectedType != nil {
               shouldPresentPicker = true
             }
           },

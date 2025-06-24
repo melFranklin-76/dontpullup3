@@ -5,27 +5,66 @@ ignore = ["../*", "/.*"]
 # 1) Async calls must use await
 [rule.async_must_await]
 scope = "*.swift"
-pattern = "\b(?!await )([A-Za-z0-9_]+)\(.*\)"
+pattern = "\\b(?!await )([A-Za-z0-9_]+)\\(.*\\)"
 message = "Async calls must use 'await'"
 action = "suggest_prefix await"
 
 # 2) No unreachable catch
 [rule.no_unreachable_catch]
 scope = "*.swift"
-pattern = "do \{(?:[^}]*?)(?!try)[^}]*?\}\s*catch"
+pattern = "do \\{(?:[^}]*?)(?!try)[^}]*?\\}\\s*catch"
 message = "Unreachable 'catch' block: no throwing calls inside do"
 action = "highlight-and-remove"
 
 # 3) Explicit self in closures
 [rule.explicit_self]
 scope = "*.swift"
-pattern = "(?<!self\.)\b(activeUploads|uploadProgress)\b"
+pattern = "(?<!self\\.)\\b(activeUploads|uploadProgress)\\b"
 message = "Use 'self.' to clarify capture semantics"
 action = "suggest_prefix self."
 
 # 4) MainActor wrap
 [rule.mainactor_wrap]
 scope = "*.swift"
-pattern = "@Published var|Task\s*\{[^}]*?\}"
+pattern = "@Published var|Task\\s*\\{[^}]*?\\}"
 message = "Mutating @MainActor properties outside MainActor context—wrap in Task {@MainActor in ...}"
 action = "suggest_wrap_MainActor"
+
+# Dependency Consistency Rule (uses dependencies.json)
+[rule.dependency_checker]
+scope = "**/*.swift"
+pattern = ""
+message = "Run test_dependency_checker.sh to verify cross-file dependencies"
+action = "run_script test_dependency_checker.sh"
+
+#!/usr/bin/env python3
+import os, sys, json, subprocess
+
+# Load dependency map
+deps = json.load(open('cursor/dependencies.json'))
+
+# Get list of changed files from environment or args
+changed = os.getenv('CURSOR_CHANGED_FILES', '').split(',')
+to_check = set()
+
+for f in changed:
+    base = os.path.basename(f)
+    if base in deps:
+        to_check.update(deps[base])
+
+# Always check the changed files too
+to_check.update(changed)
+
+# Run SwiftLint on all files in to_check
+errors = []
+for f in to_check:
+    res = subprocess.run([
+        'swiftlint', 'lint', '--config', '.cursor/swiftlint_async.yml', '--path', f
+    ], capture_output=True, text=True)
+    if res.returncode != 0:
+        errors.append(res.stdout)
+
+if errors:
+    print('Dependency checks failed:')
+    print('\n'.join(errors))
+    sys.exit(1)

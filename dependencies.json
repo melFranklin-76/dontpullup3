@@ -1,0 +1,45 @@
+{
+  "IncidentTypePicker.swift": [
+    "MapView.swift",
+    "SimplifiedReportFlow.swift",
+    "ReportFlow.swift",
+    "MapViewModel.swift"
+  ],
+  "MapView.swift": [
+    "IncidentTypePicker.swift",
+    "UploadProgressOverlay.swift",
+    "SimplifiedReportFlow.swift",
+    "MapViewModel.swift"
+  ],
+  "AuthView.swift": [
+    "AuthState.swift",
+    "AuthViewModel.swift",
+    "UserAuthViewModel.swift"
+  ],
+  "MapViewModel.swift": [
+    "MapView.swift",
+    "IncidentTypePicker.swift",
+    "PinDraft.swift",
+    "Pin.swift",
+    "FirestorePins.swift",
+    "StorageUploader.swift"
+  ],
+  "StorageUploader.swift": [
+    "MapViewModel.swift",
+    "UploadProgressOverlay.swift"
+  ],
+  "ReportFlow.swift": [
+    "IncidentTypePicker.swift",
+    "MapViewModel.swift",
+    "PinDraft.swift"
+  ],
+  "SimplifiedReportFlow.swift": [
+    "IncidentTypePicker.swift",
+    "MapViewModel.swift",
+    "PinDraft.swift"
+  ],
+  "ReportVideoView.swift": [
+    "SimplifiedReportFlow.swift",
+    "MapViewModel.swift"
+  ]
+} 

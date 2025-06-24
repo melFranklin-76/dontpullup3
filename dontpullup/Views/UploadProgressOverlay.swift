@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Minimal upload progress overlay that appears during video upload
+/// Centered upload progress overlay that appears during video upload
 struct UploadProgressOverlay: View {
     @ObservedObject var viewModel: MapViewModel
     @Environment(\.colorScheme) var colorScheme
@@ -8,44 +8,59 @@ struct UploadProgressOverlay: View {
     var body: some View {
         // Only show when actively uploading (progress > 0 and < 1)
         if viewModel.uploadProgress > 0 && viewModel.uploadProgress < 1.0 {
+            // Center the progress indicator in the middle of the screen
             VStack {
                 Spacer()
                 
-                // Floating progress indicator at bottom of screen
-                HStack(spacing: 12) {
-                    // Progress circular indicator
+                HStack {
+                    Spacer()
+                    
+                    // Enhanced centered progress indicator
+                    VStack(spacing: 16) {
+                        // Large circular progress indicator
                     ZStack {
                         Circle()
-                            .stroke(Color.gray.opacity(0.3), lineWidth: 3)
-                            .frame(width: 30, height: 30)
+                                .stroke(Color.gray.opacity(0.3), lineWidth: 4)
+                                .frame(width: 80, height: 80)
                         
                         Circle()
                             .trim(from: 0, to: CGFloat(viewModel.uploadProgress))
-                            .stroke(Color.red, lineWidth: 3)
-                            .frame(width: 30, height: 30)
+                                .stroke(Color.red, lineWidth: 4)
+                                .frame(width: 80, height: 80)
                             .rotationEffect(.degrees(-90))
+                                .animation(.easeInOut(duration: 0.3), value: viewModel.uploadProgress)
                         
-                        Text("\(Int(viewModel.uploadProgress * 100))")
-                            .font(.system(size: 10, weight: .bold))
+                            Text("\(Int(viewModel.uploadProgress * 100))%")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundColor(.white)
+                        }
+                        
+                        // Upload status text
+                        VStack(spacing: 4) {
+                            Text("Uploading Video")
+                                .font(.headline)
                             .foregroundColor(.white)
-                    }
                     
-                    Text("Uploading video...")
+                            Text("Please wait...")
                         .font(.caption)
-                        .foregroundColor(.white)
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 12)
+                                .foregroundColor(.gray)
+                        }
+                    }
+                    .padding(24)
                 .background(
-                    Capsule()
+                        RoundedRectangle(cornerRadius: 16)
                         .fill(colorScheme == .dark ? 
-                              Color.black.opacity(0.8) : 
-                              Color.gray.opacity(0.8))
-                        .shadow(color: Color.black.opacity(0.3), radius: 5)
+                                  Color.black.opacity(0.85) : 
+                                  Color.gray.opacity(0.9))
+                            .shadow(color: Color.black.opacity(0.4), radius: 8)
                 )
-                .padding(.bottom, 30)
+                    
+                    Spacer()
+                }
+                
+                Spacer()
             }
-            .transition(.opacity)
+            .transition(.scale.combined(with: .opacity))
             .animation(.easeInOut(duration: 0.3), value: viewModel.uploadProgress)
         }
     }

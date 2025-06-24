@@ -3,6 +3,8 @@ import Firebase
 import FirebaseCore
 import FirebaseAuth
 import FirebaseFirestore
+import FirebaseMessaging
+import UserNotifications
 
 // Force Firebase initialization at module load time
 private let firebaseLoadTime: Void = {
@@ -10,7 +12,7 @@ private let firebaseLoadTime: Void = {
     print("[AppDelegate] Firebase configured at module load time")
 }()
 
-class AppDelegate: UIResponder, UIApplicationDelegate {
+class AppDelegate: UIResponder, UIApplicationDelegate, MessagingDelegate, UNUserNotificationCenterDelegate {
     
     var window: UIWindow?
     
@@ -38,7 +40,33 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             FirebaseApp.configure()
             print("[AppDelegate] Firebase configured in didFinishLaunchingWithOptions")
         }
+        
+        // Configure FCM
+        setupFirebaseMessaging(application)
+        
         return true
+    }
+    
+    private func setupFirebaseMessaging(_ application: UIApplication) {
+        // Set messaging delegate
+        Messaging.messaging().delegate = self
+        
+        // Set notification delegate
+        UNUserNotificationCenter.current().delegate = self
+        
+        // Request notification permissions
+        let authOptions: UNAuthorizationOptions = [.alert, .badge, .sound]
+        UNUserNotificationCenter.current().requestAuthorization(
+            options: authOptions,
+            completionHandler: { granted, _ in
+                print("[AppDelegate] Notification permission granted: \(granted)")
+            }
+        )
+        
+        // Register for remote notifications
+        application.registerForRemoteNotifications()
+        
+        print("[AppDelegate] Firebase Messaging configured")
     }
     
     func application(_ application: UIApplication, configurationForConnecting connectingSceneSession: UISceneSession, options: UIScene.ConnectionOptions) -> UISceneConfiguration {
@@ -70,5 +98,52 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     
     func applicationWillTerminate(_ application: UIApplication) {
         // Called when the application is about to terminate
+    }
+    
+    // MARK: - Firebase Messaging Delegate
+    
+    func messaging(_ messaging: Messaging, didReceiveRegistrationToken fcmToken: String?) {
+        print("[AppDelegate] FCM registration token: \(fcmToken ?? "none")")
+        
+        // Update the FCM token in user profile
+        if let token = fcmToken {
+            Task {
+                await updateUserFCMToken(token)
+            }
+        }
+    }
+    
+    private func updateUserFCMToken(_ token: String) async {
+        // Update FCM token in AuthenticationManager
+        await AuthenticationManager.shared.updateFCMToken(token)
+    }
+    
+    // MARK: - Push Notification Handling
+    
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        print("[AppDelegate] APNs token received")
+        Messaging.messaging().apnsToken = deviceToken
+    }
+    
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        print("[AppDelegate] Failed to register for remote notifications: \(error.localizedDescription)")
+    }
+    
+    // MARK: - UNUserNotificationCenter Delegate
+    
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        // Show notification even when app is in foreground
+        // Use modern notification presentation options (iOS 14+)
+        if #available(iOS 14.0, *) {
+            completionHandler([.banner, .list, .badge, .sound])
+        } else {
+            completionHandler([.alert, .badge, .sound])
+        }
+    }
+    
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
+        // Handle notification tap
+        print("[AppDelegate] Notification tapped: \(response.notification.request.content.userInfo)")
+        completionHandler()
     }
 }

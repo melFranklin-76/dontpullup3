@@ -1,0 +1,8 @@
+disabled_rules: []
+
+custom_rules:
+  optional_chaining_on_non_optional:
+    name: "Optional chaining on non-optional"
+    regex: "let\\s+(\\w+)\\s*=\\s*\\w+View\\([^?]*\\)[^\\n]*\\n\\s*\\1\\?"
+    message: "Avoid using optional chaining on non-optional values"
+    severity: error 
