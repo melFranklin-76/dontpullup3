@@ -5,6 +5,7 @@ import FirebaseAuth
 import FirebaseFirestore
 import FirebaseStorage
 import MapKit
+import Photos
 import SwiftUI
 @preconcurrency import UIKit
 
@@ -1501,6 +1502,24 @@ class MapViewModel: NSObject, ObservableObject {
         }
       }
     }
+  }
+
+  // MARK: - Video Metadata Validation
+
+  /// Returns true if asset meets age (≤5h) and distance (≤200ft) rules
+  @MainActor
+  func checkVideoMetadata(asset: PHAsset, pinLocation: CLLocation) async -> Bool {
+    guard let creationDate = asset.creationDate,
+      let videoLocation = asset.location
+    else {
+      return false
+    }
+    let ageInHours =
+      Calendar.current
+      .dateComponents([.hour], from: creationDate, to: Date())
+      .hour ?? 0
+    let distanceInFeet = videoLocation.distance(from: pinLocation) * 3.28084
+    return ageInHours <= 5 && distanceInFeet <= 200
   }
 }
 
