@@ -1506,20 +1506,22 @@ class MapViewModel: NSObject, ObservableObject {
 
   // MARK: - Video Metadata Validation
 
-  /// Returns true if asset meets age (≤5h) and distance (≤200ft) rules
+  /// Returns true if the asset is ≤5h old and ≤200ft from the pin location
   @MainActor
   func checkVideoMetadata(asset: PHAsset, pinLocation: CLLocation) async -> Bool {
     guard let creationDate = asset.creationDate,
-      let videoLocation = asset.location
+      let assetLocation = asset.location
     else {
       return false
     }
-    let ageInHours =
+    // Calculate age in hours
+    let hours =
       Calendar.current
       .dateComponents([.hour], from: creationDate, to: Date())
-      .hour ?? 0
-    let distanceInFeet = videoLocation.distance(from: pinLocation) * 3.28084
-    return ageInHours <= 5 && distanceInFeet <= 200
+      .hour ?? Int.max
+    // Calculate distance in feet
+    let feet = assetLocation.distance(from: pinLocation) * 3.28084
+    return hours <= 5 && feet <= 200
   }
 }
 

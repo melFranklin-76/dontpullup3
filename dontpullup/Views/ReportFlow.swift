@@ -427,88 +427,96 @@ struct VideoPicker: UIViewControllerRepresentable {
         return
       }
 
-      // Get the video URL from the result
-      result.itemProvider.loadFileRepresentation(forTypeIdentifier: UTType.movie.identifier) {
-        url, error in
-        guard let url = url else {
-          DispatchQueue.main.async {
-            self.parent.onVideoPicked(nil)
-          }
+      // Check video metadata first
+      guard let assetId = result.assetIdentifier,
+        let asset = PHAsset.fetchAssets(withLocalIdentifiers: [assetId], options: nil).firstObject
+      else {
+        DispatchQueue.main.async {
+          self.parent.viewModel.showError("Could not load video metadata.")
+        }
+        return
+      }
+
+      let coord = self.parent.viewModel.reportDraft.coordinate
+      let pinLocation = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
+
+      Task { @MainActor in
+        let valid = await self.parent.viewModel.checkVideoMetadata(
+          asset: asset,
+          pinLocation: pinLocation
+        )
+
+        guard valid else {
+          self.parent.viewModel.showError("Video must be ≤5h old and ≤200 ft away.")
           return
         }
 
-        // Check video metadata before continuing
-        if let assetId = result.assetIdentifier,
-          let asset = PHAsset.fetchAssets(withLocalIdentifiers: [assetId], options: nil).firstObject
-        {
+        // Metadata OK—load file and call parent handler
+        result.itemProvider.loadFileRepresentation(forTypeIdentifier: UTType.movie.identifier) {
+          url, _ in
+          if let url = url {
+            // Check video duration (limit to 3 minutes)
+            Task {
+              do {
+                let asset = AVAsset(url: url)
+                // Get video duration using modern API
+                var duration: CMTime = .zero
 
-          Task {
-            do {
-              let draftCoord = self.parent.viewModel.reportDraft.coordinate
-              let pinLoc = CLLocation(
-                latitude: draftCoord.latitude, longitude: draftCoord.longitude)
-              let valid = await self.parent.viewModel.checkVideoMetadata(
-                asset: asset, pinLocation: pinLoc)
-              if !valid {
-                await MainActor.run {
-                  self.parent.viewModel.showError(
-                    "Video must be recorded within the last 5 hours and within 200 ft."
-                  )
-                }
-                return
-              }
+                if #available(iOS 16.0, *) {
+                  // Use modern async/await API in iOS 16+
+                  duration = try await asset.load(.duration)
+                } else {
+                  // Use older API for iOS 15 and below
+                  let durationKey = "duration"
+                  try await withCheckedThrowingContinuation {
+                    (continuation: CheckedContinuation<Void, Error>) in
+                    asset.loadValuesAsynchronously(forKeys: [durationKey]) {
+                      var error: NSError?
+                      let status = asset.statusOfValue(forKey: durationKey, error: &error)
 
-              // Check video duration (limit to 3 minutes)
-              let asset = AVAsset(url: url)
-              // Get video duration using modern API
-              var duration: CMTime = .zero
-
-              if #available(iOS 16.0, *) {
-                // Use modern async/await API in iOS 16+
-                duration = try await asset.load(.duration)
-              } else {
-                // Use older API for iOS 15 and below
-                let durationKey = "duration"
-                try await withCheckedThrowingContinuation {
-                  (continuation: CheckedContinuation<Void, Error>) in
-                  asset.loadValuesAsynchronously(forKeys: [durationKey]) {
-                    var error: NSError?
-                    let status = asset.statusOfValue(forKey: durationKey, error: &error)
-
-                    if status == .loaded {
-                      duration = asset.duration
-                      continuation.resume()
-                    } else if let error = error {
-                      continuation.resume(throwing: error)
-                    } else {
-                      continuation.resume(
-                        throwing: NSError(
-                          domain: "AVAsset", code: -1,
-                          userInfo: [NSLocalizedDescriptionKey: "Failed to load duration"]))
+                      if status == .loaded {
+                        duration = asset.duration
+                        continuation.resume()
+                      } else if let error = error {
+                        continuation.resume(throwing: error)
+                      } else {
+                        continuation.resume(
+                          throwing: NSError(
+                            domain: "AVAsset", code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "Failed to load duration"]))
+                      }
                     }
                   }
                 }
-              }
 
-              // Check if video is too long
-              let maxDurationInSeconds: Double = 180  // 3 minutes
-              if duration.seconds > maxDurationInSeconds {
-                print("[VideoPicker] Video too long: \(duration.seconds) seconds")
+                // Check if video is too long
+                let maxDurationInSeconds: Double = 180  // 3 minutes
+                if duration.seconds > maxDurationInSeconds {
+                  print("[VideoPicker] Video too long: \(duration.seconds) seconds")
+                  await MainActor.run {
+                    self.parent.viewModel.showError("Video must be under 3 minutes")
+                    self.parent.onVideoPicked(nil)
+                  }
+                  return
+                }
+
+                // Video is acceptable
                 await MainActor.run {
+                  self.parent.onVideoPicked(url)
+                }
+              } catch {
+                print("[VideoPicker] Error checking video duration: \(error)")
+                await MainActor.run {
+                  self.parent.viewModel.showError(
+                    "Error processing video: \(error.localizedDescription)")
                   self.parent.onVideoPicked(nil)
                 }
-                return
               }
-
-              // Video is acceptable
-              await MainActor.run {
-                self.parent.onVideoPicked(url)
-              }
-            } catch {
-              print("[VideoPicker] Error checking video duration: \(error)")
-              await MainActor.run {
-                self.parent.onVideoPicked(nil)
-              }
+            }
+          } else {
+            DispatchQueue.main.async {
+              self.parent.viewModel.showError("Failed to load video file.")
+              self.parent.onVideoPicked(nil)
             }
           }
         }

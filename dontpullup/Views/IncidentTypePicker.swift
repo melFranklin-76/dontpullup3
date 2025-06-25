@@ -321,27 +321,29 @@ class VideoDelegateAdapter: NSObject, PHPickerViewControllerDelegate {
     print("[VideoDelegateAdapter] User selected a video, starting processing...")
 
     // Check video metadata before proceeding
-    Task.detached(priority: .userInitiated) {
+    Task { @MainActor in
       guard let assetId = result.assetIdentifier,
-        let asset = PHAsset.fetchAssets(withLocalIdentifiers: [assetId], options: nil).firstObject
+        let asset = PHAsset.fetchAssets(withLocalIdentifiers: [assetId], options: nil).firstObject,
+        let coord = self.viewModel.pendingCoordinate
       else {
-        await MainActor.run {
-          self.viewModel.showError("Could not load video metadata.")
-        }
+        self.viewModel.showError("Could not load video metadata.")
         return
       }
 
-      let pinLoc = CLLocation(
-        latitude: self.viewModel.pendingCoordinate?.latitude ?? 0,
-        longitude: self.viewModel.pendingCoordinate?.longitude ?? 0
+      let pinLocation = CLLocation(
+        latitude: coord.latitude,
+        longitude: coord.longitude
       )
-      let isValid = await self.viewModel.checkVideoMetadata(asset: asset, pinLocation: pinLoc)
+
+      let isValid = await self.viewModel.checkVideoMetadata(
+        asset: asset,
+        pinLocation: pinLocation
+      )
+
       guard isValid else {
-        await MainActor.run {
-          self.viewModel.showError(
-            "Video must be recorded within the last 5 hours and within 200 ft of the pin location."
-          )
-        }
+        self.viewModel.showError(
+          "Video must be ≤5 hours old and ≤200 ft from the pin location."
+        )
         return
       }
 
