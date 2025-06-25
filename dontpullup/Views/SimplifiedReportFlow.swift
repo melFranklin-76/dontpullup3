@@ -167,6 +167,7 @@ extension Coordinator: PHPickerViewControllerDelegate {
 
           let isValid = await self.parent.viewModel.checkVideoMetadata(
             asset: asset, pinLocation: pinLoc)
+
           if !isValid {
             await MainActor.run {
               self.parent.viewModel.showError(
