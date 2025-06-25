@@ -155,71 +155,103 @@ extension Coordinator: PHPickerViewControllerDelegate {
       return
     }
 
-    // Get the video URL from the result
-    result.itemProvider.loadFileRepresentation(forTypeIdentifier: UTType.movie.identifier) {
-      url, error in
-      guard let url = url else {
-        DispatchQueue.main.async {
-          self.parent.viewModel.showError("Could not load video")
-        }
-        return
-      }
+    // Check video metadata first
+    if let assetId = result.assetIdentifier,
+      let asset = PHAsset.fetchAssets(withLocalIdentifiers: [assetId], options: nil).firstObject
+    {
 
-      // Check video duration (limit to 3 minutes)
-      let asset = AVAsset(url: url)
       Task {
         do {
-          // Get video duration using modern API
-          var duration: CMTime = .zero
+          let draftCoord = self.parent.viewModel.reportDraft.coordinate
+          let pinLoc = CLLocation(latitude: draftCoord.latitude, longitude: draftCoord.longitude)
 
-          if #available(iOS 16.0, *) {
-            // Use modern async/await API in iOS 16+
-            duration = try await asset.load(.duration)
-          } else {
-            // Use older API for iOS 15 and below
-            let durationKey = "duration"
-            try await withCheckedThrowingContinuation {
-              (continuation: CheckedContinuation<Void, Error>) in
-              asset.loadValuesAsynchronously(forKeys: [durationKey]) {
-                var error: NSError?
-                let status = asset.statusOfValue(forKey: durationKey, error: &error)
-
-                if status == .loaded {
-                  duration = asset.duration
-                  continuation.resume()
-                } else if let error = error {
-                  continuation.resume(throwing: error)
-                } else {
-                  continuation.resume(
-                    throwing: NSError(
-                      domain: "AVAsset", code: -1,
-                      userInfo: [NSLocalizedDescriptionKey: "Failed to load duration"]))
-                }
-              }
-            }
-          }
-
-          // Check if video is too long
-          let maxDurationInSeconds: Double = 180  // 3 minutes
-          if duration.seconds > maxDurationInSeconds {
-            print("[SimplifiedReportFlow] Video too long: \(duration.seconds) seconds")
+          let isValid = await self.parent.viewModel.checkVideoMetadata(
+            asset: asset, pinLocation: pinLoc)
+          if !isValid {
             await MainActor.run {
-              self.parent.viewModel.showError("Video must be under 3 minutes")
+              self.parent.viewModel.showError(
+                "Video must be recorded within the last 5 hours and within 200 ft of the pin location."
+              )
             }
             return
           }
 
-          // Video is acceptable
-          await MainActor.run {
-            self.parent.viewModel.reportDraft.videoURL = url
+          // Continue with the rest of the process if metadata check passes
+          // Get the video URL from the result
+          result.itemProvider.loadFileRepresentation(forTypeIdentifier: UTType.movie.identifier) {
+            url, error in
+            guard let url = url else {
+              Task { @MainActor in
+                self.parent.viewModel.showError("Could not load video")
+              }
+              return
+            }
+
+            // Check video duration (limit to 3 minutes)
             Task {
-              await self.parent.viewModel.upload(draft: self.parent.viewModel.reportDraft)
+              do {
+                let asset = AVAsset(url: url)
+                // Get video duration using modern API
+                var duration: CMTime = .zero
+
+                if #available(iOS 16.0, *) {
+                  // Use modern async/await API in iOS 16+
+                  duration = try await asset.load(.duration)
+                } else {
+                  // Use older API for iOS 15 and below
+                  let durationKey = "duration"
+                  try await withCheckedThrowingContinuation {
+                    (continuation: CheckedContinuation<Void, Error>) in
+                    asset.loadValuesAsynchronously(forKeys: [durationKey]) {
+                      var error: NSError?
+                      let status = asset.statusOfValue(forKey: durationKey, error: &error)
+
+                      if status == .loaded {
+                        duration = asset.duration
+                        continuation.resume()
+                      } else if let error = error {
+                        continuation.resume(throwing: error)
+                      } else {
+                        continuation.resume(
+                          throwing: NSError(
+                            domain: "AVAsset", code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "Failed to load duration"]))
+                      }
+                    }
+                  }
+                }
+
+                // Check if video is too long
+                let maxDurationInSeconds: Double = 180  // 3 minutes
+                if duration.seconds > maxDurationInSeconds {
+                  print("[SimplifiedReportFlow] Video too long: \(duration.seconds) seconds")
+                  await MainActor.run {
+                    self.parent.viewModel.showError("Video must be under 3 minutes")
+                  }
+                  return
+                }
+
+                // Video is acceptable
+                await MainActor.run {
+                  self.parent.viewModel.reportDraft.videoURL = url
+                  Task {
+                    await self.parent.viewModel.upload(draft: self.parent.viewModel.reportDraft)
+                  }
+                }
+              } catch {
+                print("[SimplifiedReportFlow] Error checking video duration: \(error)")
+                await MainActor.run {
+                  self.parent.viewModel.showError(
+                    "Error processing video: \(error.localizedDescription)")
+                }
+              }
             }
           }
         } catch {
-          print("[SimplifiedReportFlow] Error checking video duration: \(error)")
+          print("[SimplifiedReportFlow] Error checking video metadata: \(error)")
           await MainActor.run {
-            self.parent.viewModel.showError("Error processing video: \(error.localizedDescription)")
+            self.parent.viewModel.showError(
+              "Error processing video metadata: \(error.localizedDescription)")
           }
         }
       }

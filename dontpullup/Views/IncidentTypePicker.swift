@@ -320,8 +320,32 @@ class VideoDelegateAdapter: NSObject, PHPickerViewControllerDelegate {
 
     print("[VideoDelegateAdapter] User selected a video, starting processing...")
 
-    // Process video in background to avoid main thread blocking
+    // Check video metadata before proceeding
     Task.detached(priority: .userInitiated) {
+      guard let assetId = result.assetIdentifier,
+        let asset = PHAsset.fetchAssets(withLocalIdentifiers: [assetId], options: nil).firstObject
+      else {
+        await MainActor.run {
+          self.viewModel.showError("Could not load video metadata.")
+        }
+        return
+      }
+
+      let pinLoc = CLLocation(
+        latitude: self.viewModel.pendingCoordinate?.latitude ?? 0,
+        longitude: self.viewModel.pendingCoordinate?.longitude ?? 0
+      )
+      let isValid = await self.viewModel.checkVideoMetadata(asset: asset, pinLocation: pinLoc)
+      guard isValid else {
+        await MainActor.run {
+          self.viewModel.showError(
+            "Video must be recorded within the last 5 hours and within 200 ft of the pin location."
+          )
+        }
+        return
+      }
+
+      // Process video in background to avoid main thread blocking
       await self.processVideoInBackground(result)
     }
   }
