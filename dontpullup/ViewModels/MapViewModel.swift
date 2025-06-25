@@ -1021,62 +1021,60 @@ class MapViewModel: NSObject, ObservableObject {
                 // Store the continuation outside the Task so we can resume it properly
                 let localContinuation = continuation
 
-                db.collection("pins").document(pinId).setData(pinData) { error in
-                  if let error = error {
-                    print(
-                      "[MapViewModel] Failed to save pin to Firestore: \(error.localizedDescription)"
+                // Use async/await instead of completion handler
+                do {
+                  try await db.collection("pins").document(pinId).setData(pinData)
+
+                  print("[MapViewModel] Successfully saved pin to Firestore")
+
+                  // Update the existing pin with video URL
+                  if let index = self.pins.firstIndex(where: { $0.id == pinId }) {
+                    self.pins[index] = Pin(
+                      id: pinId,
+                      coordinate: pinCoordinate,
+                      incidentType: incidentType,
+                      videoURL: downloadURL.absoluteString,
+                      userId: currentUserId
                     )
-                    // Remove the pin from local array since Firestore save failed
-                    Task { @MainActor in
-                      self.pins.removeAll { $0.id == pinId }
-                      self.activeUploads = max(0, self.activeUploads - 1)
+                    print("[MapViewModel] Updated pin with video URL")
+                  }
+
+                  self.activeUploads = max(0, self.activeUploads - 1)
+                  self.uploadProgress = 1.0
+
+                  // Clear progress after a brief delay
+                  Task {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)  // 1 second
+
+                    // Ensure we're on the main actor
+                    await MainActor.run {
                       self.uploadProgress = 0
                     }
-                    // Resume the continuation outside of Task
-                    localContinuation.resume(throwing: error)
-                  } else {
-                    print("[MapViewModel] Successfully saved pin to Firestore")
-
-                    // Update the existing pin with video URL
-                    Task { @MainActor in
-                      if let index = self.pins.firstIndex(where: { $0.id == pinId }) {
-                        self.pins[index] = Pin(
-                          id: pinId,
-                          coordinate: pinCoordinate,
-                          incidentType: incidentType,
-                          videoURL: downloadURL.absoluteString,
-                          userId: currentUserId
-                        )
-                        print("[MapViewModel] Updated pin with video URL")
-                      }
-
-                      self.activeUploads = max(0, self.activeUploads - 1)
-                      self.uploadProgress = 1.0
-
-                      // Clear progress after a brief delay
-                      Task {
-                        try? await Task.sleep(nanoseconds: 1_000_000_000)  // 1 second
-
-                        // Ensure we're on the main actor
-                        await MainActor.run {
-                          self.uploadProgress = 0
-                        }
-                      }
-
-                      // Send notifications to users in the same zip code
-                      await self.sendZipCodeNotifications(
-                        for: Pin(
-                          id: pinId,
-                          coordinate: pinCoordinate,
-                          incidentType: incidentType,
-                          videoURL: downloadURL.absoluteString,
-                          userId: currentUserId
-                        ))
-                    }
-
-                    // Resume the continuation outside of Task
-                    localContinuation.resume(returning: ())
                   }
+
+                  // Send notifications to users in the same zip code
+                  await self.sendZipCodeNotifications(
+                    for: Pin(
+                      id: pinId,
+                      coordinate: pinCoordinate,
+                      incidentType: incidentType,
+                      videoURL: downloadURL.absoluteString,
+                      userId: currentUserId
+                    ))
+
+                  // Resume the continuation with success
+                  localContinuation.resume(returning: ())
+                } catch {
+                  print(
+                    "[MapViewModel] Failed to save pin to Firestore: \(error.localizedDescription)"
+                  )
+                  // Remove the pin from local array since Firestore save failed
+                  self.pins.removeAll { $0.id == pinId }
+                  self.activeUploads = max(0, self.activeUploads - 1)
+                  self.uploadProgress = 0
+
+                  // Resume the continuation with error
+                  localContinuation.resume(throwing: error)
                 }
               }
             }
