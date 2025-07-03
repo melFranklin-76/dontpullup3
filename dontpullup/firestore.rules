@@ -13,11 +13,9 @@ service cloud.firestore {
         && request.resource.data.keys().hasAll(['id', 'email', 'zipCode'])
         && request.resource.data.id == userId;
       
-      // Allow reading users for notification purposes
-      // Users can read other users' profiles if they're in the same zip code
-      allow read: if request.auth != null 
-        && request.auth.uid != userId
-        && resource.data.zipCode == getUserZipCode(request.auth.uid);
+      // Allow reading users for notification purposes (any authenticated user can read)
+      // This is needed for the notification system to find users in different zip codes
+      allow read: if request.auth != null && request.auth.uid != userId;
         
       // Allow querying users collection for notification system
       allow list: if request.auth != null;
@@ -53,7 +51,7 @@ service cloud.firestore {
       allow read: if false; // TODO: Add admin role checking
     }
     
-    // Helper function to get user's zip code
+    // Helper function to get user's zip code (keeping for potential future use)
     function getUserZipCode(uid) {
       return get(/databases/$(database)/documents/users/$(uid)).data.zipCode;
     }

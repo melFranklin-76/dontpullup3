@@ -159,12 +159,40 @@ struct MapView: UIViewRepresentable {
     defaults.synchronize()
   }
 
-  func updateUIView(_ mapView: MKMapView, context: Context) {
-    // Remove debug logging
-    if !context.coordinator.hasLoggedMapStatus {
-      context.coordinator.hasLoggedMapStatus = true
+  func updateUIView(_ view: MKMapView, context: Context) {
+    // Handle region changes
+    if let mapRegion = viewModel.mapRegion {
+      view.setRegion(mapRegion, animated: true)
+      // Reset mapRegion to nil after applying it to avoid reapplying the same region
+      DispatchQueue.main.async {
+        viewModel.mapRegion = nil
+      }
     }
 
+    // Handle pin updates
+    updatePins(on: view)
+  }
+
+  func makeCoordinator() -> Coordinator {
+    let coordinator = Coordinator(self)
+
+    // Add observer in coordinator so it can be properly cleaned up
+    NotificationCenter.default.addObserver(
+      coordinator,
+      selector: #selector(Coordinator.handleMapRegionChanged),
+      name: Notification.Name("MapRegionChanged"),
+      object: nil)
+
+    return coordinator
+  }
+
+  // Add overlay to display upload progress
+  static func dismantleUIView(_ uiView: MKMapView, coordinator: Coordinator) {
+    // Clean up when view is removed
+  }
+
+  // Helper function to update pins on the map
+  private func updatePins(on mapView: MKMapView) {
     // Update map type with animation if needed
     if mapView.mapType != viewModel.mapType {
       UIView.animate(withDuration: 0.3) {
@@ -198,44 +226,6 @@ struct MapView: UIViewRepresentable {
       mapView.removeAnnotations(annotationsToRemove)
       mapView.addAnnotations(newAnnotations)
     }
-
-    // Update region if needed and enforce minimum zoom
-    if let newRegion = viewModel.mapRegion {
-      let enforcedSpan = MKCoordinateSpan(
-        latitudeDelta: max(newRegion.span.latitudeDelta, MapViewConstants.minSpan.latitudeDelta),
-        longitudeDelta: max(newRegion.span.longitudeDelta, MapViewConstants.minSpan.longitudeDelta)
-      )
-
-      let region = MKCoordinateRegion(
-        center: newRegion.center,
-        span: enforcedSpan
-      )
-
-      // Only update region if it's significantly different
-      let currentCenter = mapView.region.center
-      let newCenter = region.center
-      let distance = MKMapPoint(currentCenter).distance(to: MKMapPoint(newCenter))
-
-      if distance > 100  // If centers are more than 100 points apart
-        || abs(mapView.region.span.latitudeDelta - region.span.latitudeDelta) > 0.01
-      {
-        mapView.setRegion(region, animated: true)
-      }
-
-      // Reset region after animation
-      DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak viewModel] in
-        viewModel?.mapRegion = nil
-      }
-    }
-  }
-
-  func makeCoordinator() -> Coordinator {
-    Coordinator(self)
-  }
-
-  // Add overlay to display upload progress
-  static func dismantleUIView(_ uiView: MKMapView, coordinator: Coordinator) {
-    // Clean up when view is removed
   }
 }
 
@@ -286,14 +276,31 @@ class Coordinator: NSObject, MKMapViewDelegate {
 
   init(_ parent: MapView) {
     self.parent = parent
+    super.init()
+  }
+
+  deinit {
+    // Clean up notification observers
+    NotificationCenter.default.removeObserver(self)
   }
 
   @objc func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
+    print("[MapView] Long press detected - state: \(gesture.state.rawValue)")
+
     // Respond to long-press only when NOT in delete-edit mode
-    guard gesture.state == .began, parent.viewModel.isEditMode == false else { return }
+    guard gesture.state == .began else {
+      print("[MapView] Long press ignored - wrong state")
+      return
+    }
+
+    guard parent.viewModel.isEditMode == false else {
+      print("[MapView] Long press ignored - in edit mode")
+      return
+    }
 
     // Check if user is anonymous first
     if parent.viewModel.authState.isAnonymous {
+      print("[MapView] Long press blocked - user is anonymous")
       parent.viewModel.showError("Guests cannot drop new pins.")
       return
     }
@@ -301,14 +308,21 @@ class Coordinator: NSObject, MKMapViewDelegate {
     let point = gesture.location(in: gesture.view)
     let coordinate = (gesture.view as? MKMapView)?.convert(point, toCoordinateFrom: gesture.view)
 
-    guard let validCoordinate = coordinate else { return }
+    guard let validCoordinate = coordinate else {
+      print("[MapView] Long press failed - invalid coordinate")
+      return
+    }
 
     // Check authentication first
     guard Auth.auth().currentUser != nil else {
+      print("[MapView] Long press blocked - no current user")
       parent.viewModel.showError("You need to sign in to drop pins")
       return
     }
 
+    print(
+      "[MapView] Long press successful - calling handleLocationAction with coordinate: \(validCoordinate)"
+    )
     // Use the unified location handler for pin drop
     parent.viewModel.handleLocationAction(.pinDrop(validCoordinate))
   }
@@ -435,7 +449,14 @@ class Coordinator: NSObject, MKMapViewDelegate {
       return
     }
 
-    // Set current video ID for flagging reference
+    // Check if user can watch this video based on premium status and zip code
+    if !parent.viewModel.canWatchVideo(for: pin) {
+      // Show premium upgrade alert
+      parent.viewModel.showVideoAccessRestrictedAlert()
+      return
+    }
+
+    // Store video ID for potential flag reports
     parent.viewModel.currentlyPlayingVideoId = pin.id
 
     // Use the new refresh mechanism to handle video playback
@@ -509,6 +530,17 @@ class Coordinator: NSObject, MKMapViewDelegate {
 
     // Use continuation to bridge completion handler
     await withCheckedContinuation { continuation in
+      // Ensure proper cleanup of AVPlayerViewController to prevent focus system warnings
+      if let playerVC = vc as? AVPlayerViewController {
+        // Stop player and remove observers before dismissing
+        playerVC.player?.pause()
+        playerVC.player?.replaceCurrentItem(with: nil)
+
+        // Remove any observers that might be attached
+        NotificationCenter.default.removeObserver(
+          self, name: .AVPlayerItemDidPlayToEndTime, object: nil)
+      }
+
       vc.dismiss(animated: animated) {
         continuation.resume()
       }
@@ -659,6 +691,20 @@ class Coordinator: NSObject, MKMapViewDelegate {
     // Store the player reference and show SwiftUI report view
     parent.currentVideoPlayer = playerVC
     parent.showingReportVideo = true
+  }
+
+  @objc func handleMapRegionChanged() {
+    // Handle region change notification
+    if let currentRegion = self.parent.viewModel.mapRegion,
+      currentRegion.center.latitude != self.parent.viewModel.region.center.latitude
+        || currentRegion.center.longitude != self.parent.viewModel.region.center.longitude
+        || currentRegion.span.latitudeDelta != self.parent.viewModel.region.span.latitudeDelta
+        || currentRegion.span.longitudeDelta != self.parent.viewModel.region.span.longitudeDelta
+    {
+      DispatchQueue.main.async {
+        self.parent.viewModel.mapRegion = currentRegion
+      }
+    }
   }
 }
 
@@ -869,6 +915,16 @@ func playVideoWithURL(_ videoURL: String, for pin: Pin) {
   // Play video from URL
   if let url = URL(string: videoURL) {
     print("Playing directly from URL...")
+
+    // Configure audio session before playback to prevent overload
+    do {
+      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+      try AVAudioSession.sharedInstance().setActive(true, options: .notifyOthersOnDeactivation)
+    } catch {
+      print("[MapView] Failed to configure audio session: \(error)")
+      // Continue anyway, as video might still play
+    }
+
     let player = AVPlayer(url: url)
     let playerViewController = AVPlayerViewController()
     playerViewController.player = player
@@ -892,7 +948,11 @@ func playVideoWithURL(_ videoURL: String, for pin: Pin) {
         forName: .AVPlayerItemDidPlayToEndTime, object: player.currentItem, queue: .main
       ) { _ in
         print("Player item finished playing. Cleaning up temp file: \(url.lastPathComponent)")
-        playerViewController.dismiss(animated: true)
+        playerViewController.dismiss(animated: true) {
+          // Deactivate audio session when done
+          try? AVAudioSession.sharedInstance().setActive(
+            false, options: .notifyOthersOnDeactivation)
+        }
       }
     }
   } else {

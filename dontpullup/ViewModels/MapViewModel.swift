@@ -39,6 +39,7 @@ class MapViewModel: NSObject, ObservableObject {
   @Published var reportDraft = PinDraft()  // holds coord/type/url
   @Published var isLimitedFunctionalityDueToLocationDenial: Bool = false
   @Published var activeUploads: Int = 0  // Track number of active uploads
+  @Published var showingContentGuidelines = false  // Show guidelines before first pin drop
   // Flag to remember that the user tapped center button before granting permission
   private var shouldCenterAfterAuthorization = false
   private var shouldCenterAfterLocationUpdate = false
@@ -68,19 +69,10 @@ class MapViewModel: NSObject, ObservableObject {
         return pin.userId == currentUserId
       }
 
-      // Apply incident type filter
+      // Apply incident type filter only - ALL PINS ARE VISIBLE TO ALL USERS
+      // Video watching restrictions are handled when user tries to play the video
       let passesTypeFilter = selectedFilters.isEmpty || selectedFilters.contains(pin.incidentType)
 
-      // Apply zip code restriction for non-premium users
-      if let userProfile = authManager.currentUserProfile, !userProfile.isPremium {
-        // For non-premium users, only show pins in their original zip code
-        let pinInUserZipCode = pin.zipCode == userProfile.originalZipCode
-
-        // Show pins that pass both the type filter and are in user's original zip code
-        return passesTypeFilter && pinInUserZipCode
-      }
-
-      // Premium users see all pins that match their type filters
       return passesTypeFilter
     }
   }
@@ -362,6 +354,14 @@ class MapViewModel: NSObject, ObservableObject {
       handleLocationAction(.pinDrop(coordinate))
       return
     }
+
+    // Check if user has accepted content guidelines first
+    if !UserDefaults.standard.hasAcceptedContentGuidelines {
+      pendingCoordinate = coordinate
+      showingContentGuidelines = true
+      return
+    }
+
     guard let userLocation = userLocation else {
       showAlert = true
       alertMessage = "Unable to determine your location"
@@ -622,7 +622,11 @@ class MapViewModel: NSObject, ObservableObject {
       userId: currentUserId
     )
 
+    // Start the geocoding process to get the zip code for this pin
     Task {
+      // Get the zip code for this coordinate
+      let pinZipCode = await getZipCodeFromCoordinate(pendingCoordinate)
+
       do {
         let data: [String: Any] = [
           "id": pinId,
@@ -633,17 +637,22 @@ class MapViewModel: NSObject, ObservableObject {
           "userId": currentUserId,
           "timestamp": Timestamp(),
           "deviceID": UIDevice.current.identifierForVendor?.uuidString ?? "",
+          "zipCode": pinZipCode,  // Save the zip code with the pin
         ]
 
         try await db.collection("pins").document(pinId).setData(data)
         await MainActor.run {
-          self.pins.append(newPin)
+          // Update the pin with the zip code
+          var updatedPin = newPin
+          updatedPin.zipCode = pinZipCode
+
+          self.pins.append(updatedPin)
           self.pendingCoordinate = nil
           self.showingIncidentPicker = false
 
-          // Send notifications to users in the same zip code
+          // Send notifications to users in the pin's zip code
           Task {
-            await self.sendZipCodeNotifications(for: newPin)
+            await self.sendZipCodeNotifications(for: updatedPin)
           }
         }
       } catch {
@@ -655,6 +664,37 @@ class MapViewModel: NSObject, ObservableObject {
         }
       }
     }
+  }
+
+  /// Gets the zip code for a given coordinate using reverse geocoding
+  private func getZipCodeFromCoordinate(_ coordinate: CLLocationCoordinate2D) async -> String {
+    let geocoder = CLGeocoder()
+    let location = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+
+    do {
+      let placemarks = try await geocoder.reverseGeocodeLocation(location)
+
+      if let zipCode = placemarks.first?.postalCode, !zipCode.isEmpty {
+        print(
+          "[MapViewModel] Found zip code \(zipCode) for coordinate: \(coordinate.latitude), \(coordinate.longitude)"
+        )
+        return zipCode
+      } else {
+        print(
+          "[MapViewModel] No zip code found for coordinate: \(coordinate.latitude), \(coordinate.longitude)"
+        )
+      }
+    } catch {
+      print("[MapViewModel] Error getting zip code: \(error.localizedDescription)")
+    }
+
+    // If geocoding fails, try to use the current user's zip code as a fallback
+    if let userZipCode = authManager.currentUserProfile?.zipCode, !userZipCode.isEmpty {
+      print("[MapViewModel] Using user's zip code as fallback: \(userZipCode)")
+      return userZipCode
+    }
+
+    return ""
   }
 
   func deletePin(_ pin: Pin) async throws {
@@ -776,9 +816,32 @@ class MapViewModel: NSObject, ObservableObject {
 
           pin.zipCode = zipCode  // Set zip code
 
-          // If pin doesn't have a zip code, try to determine it based on current user's zip code
-          if zipCode.isEmpty, let userProfile = self.authManager.currentUserProfile {
-            pin.zipCode = userProfile.zipCode
+          // If pin doesn't have a zip code, geocode it based on the pin's coordinate
+          if zipCode.isEmpty {
+            Task {
+              let geocodedZipCode = await self.getZipCodeFromCoordinate(pin.coordinate)
+              await MainActor.run {
+                if let index = self.pins.firstIndex(where: { $0.id == pin.id }) {
+                  self.pins[index].zipCode = geocodedZipCode
+
+                  // Update Firestore with the geocoded zip code
+                  Task {
+                    do {
+                      try await self.db.collection("pins").document(pin.id).updateData([
+                        "zipCode": geocodedZipCode
+                      ])
+                      print(
+                        "[MapViewModel] Updated pin \(pin.id) with geocoded zip code: \(geocodedZipCode)"
+                      )
+                    } catch {
+                      print(
+                        "[MapViewModel] Error updating pin zip code in Firestore: \(error.localizedDescription)"
+                      )
+                    }
+                  }
+                }
+              }
+            }
           }
 
           return pin
@@ -896,27 +959,29 @@ class MapViewModel: NSObject, ObservableObject {
     )
     print("[MapViewModel] Generated pin ID: \(pinId)")
 
-    // Increment active uploads counter and clear pending state - DO THIS FIRST
+    // Create pin object
+    let newPin = Pin(
+      id: pinId,
+      coordinate: pinCoordinate,
+      incidentType: incidentType,
+      videoURL: "",  // Empty initially, will be updated after upload
+      userId: currentUserId
+    )
+
+    // Increment active uploads counter and clear pending state
     await MainActor.run {
       self.activeUploads += 1
       self.pendingCoordinate = nil
       self.pendingVideoData = nil
       self.showingIncidentPicker = false
       self.uploadProgress = 0.3  // Show immediate progress
-    }
 
-    // Create pin immediately and add to local array to show on map during upload
-    await MainActor.run {
-      let newPin = Pin(
-        id: pinId,
-        coordinate: pinCoordinate,
-        incidentType: incidentType,
-        videoURL: "",  // Empty initially, will be updated after upload
-        userId: currentUserId
-      )
-
+      // Add pin to local array BEFORE starting upload
       self.pins.append(newPin)
       print("[MapViewModel] Pin created and displayed on map, starting upload...")
+
+      // Force UI update
+      self.objectWillChange.send()
     }
 
     // Perform upload in background task to avoid blocking
@@ -1000,8 +1065,8 @@ class MapViewModel: NSObject, ObservableObject {
               // Get user's current zip code - SAFELY
               // We need to access MainActor-isolated property in a MainActor context
               Task { @MainActor in
-                // Get zip code on the main actor
-                let userZipCode = self.authManager.currentUserProfile?.zipCode ?? ""
+                // Get zip code for the pin's location by geocoding the coordinate
+                let pinZipCode = await self.getZipCodeFromCoordinate(pinCoordinate)
 
                 // Create pin data
                 let pinData: [String: Any] = [
@@ -1012,7 +1077,7 @@ class MapViewModel: NSObject, ObservableObject {
                   "videoURL": downloadURL.absoluteString,
                   "userId": currentUserId,
                   "timestamp": FieldValue.serverTimestamp(),
-                  "zipCode": userZipCode,  // Add zip code to the pin data
+                  "zipCode": pinZipCode,  // Use geocoded zip code from pin location
                 ]
 
                 // Add pin to Firestore
@@ -1034,9 +1099,28 @@ class MapViewModel: NSObject, ObservableObject {
                       coordinate: pinCoordinate,
                       incidentType: incidentType,
                       videoURL: downloadURL.absoluteString,
-                      userId: currentUserId
+                      userId: currentUserId,
+                      zipCode: pinZipCode
                     )
                     print("[MapViewModel] Updated pin with video URL")
+
+                    // Force UI update
+                    self.objectWillChange.send()
+                  } else {
+                    // Pin wasn't found in the array, add it now
+                    print("[MapViewModel] Pin not found in local array, adding it now")
+                    self.pins.append(
+                      Pin(
+                        id: pinId,
+                        coordinate: pinCoordinate,
+                        incidentType: incidentType,
+                        videoURL: downloadURL.absoluteString,
+                        userId: currentUserId,
+                        zipCode: pinZipCode
+                      )
+                    )
+                    // Force UI update
+                    self.objectWillChange.send()
                   }
 
                   self.activeUploads = max(0, self.activeUploads - 1)
@@ -1059,7 +1143,8 @@ class MapViewModel: NSObject, ObservableObject {
                       coordinate: pinCoordinate,
                       incidentType: incidentType,
                       videoURL: downloadURL.absoluteString,
-                      userId: currentUserId
+                      userId: currentUserId,
+                      zipCode: pinZipCode
                     ))
 
                   // Resume the continuation with success
@@ -1165,8 +1250,9 @@ class MapViewModel: NSObject, ObservableObject {
       // This prevents race conditions where the listener overwrites our local update
       print("[MapViewModel] Waiting for Firestore listener to add pin to local array")
 
-      // Send notifications
-      let newPin = draft.makePin(id: pinId, remote: remoteURL)
+      // Send notifications - geocode the coordinate to get the zip code
+      let pinZipCode = await getZipCodeFromCoordinate(draft.coordinate)
+      let newPin = draft.makePin(id: pinId, remote: remoteURL, zipCode: pinZipCode)
       await sendZipCodeNotifications(for: newPin)
 
       reportStep = nil  // Close sheet
@@ -1413,13 +1499,41 @@ class MapViewModel: NSObject, ObservableObject {
 
   // MARK: - Notification Handling
   private func sendZipCodeNotifications(for pin: Pin) async {
-    guard let currentUserProfile = authManager.currentUserProfile else {
+    guard authManager.currentUserProfile != nil else {
       print("[MapViewModel] Cannot send notifications - no current user profile")
       return
     }
 
-    let zipCode = currentUserProfile.zipCode
-    print("[MapViewModel] Sending notifications to users in zip code: \(zipCode)")
+    // Get the pin's zip code if it exists, otherwise use the user's zip code
+    var zipCode = pin.zipCode
+
+    // If pin doesn't have a zip code, geocode it from the pin's coordinate
+    if zipCode.isEmpty {
+      zipCode = await getZipCodeFromCoordinate(pin.coordinate)
+      print("[MapViewModel] Pin has no zip code, geocoded zip code: \(zipCode)")
+
+      // Update the pin's zip code in Firestore for future reference
+      if !zipCode.isEmpty {
+        Task {
+          do {
+            try await db.collection("pins").document(pin.id).updateData(["zipCode": zipCode])
+            print("[MapViewModel] Updated pin's zip code in Firestore: \(zipCode)")
+          } catch {
+            print("[MapViewModel] Error updating pin's zip code: \(error.localizedDescription)")
+          }
+        }
+      }
+    }
+
+    // Skip notifications if the zip code is empty or invalid
+    guard !zipCode.isEmpty else {
+      print("[MapViewModel] Cannot send notifications - invalid zip code")
+      return
+    }
+
+    print(
+      "[MapViewModel] Processing notification for \(pin.incidentType.title) in zip code: \(zipCode)"
+    )
 
     // Send notifications to other users in the same zip code
     await notificationManager.notifyUsersInZipCode(for: pin, zipCode: zipCode)
@@ -1472,8 +1586,25 @@ class MapViewModel: NSObject, ObservableObject {
   }
 
   func startReportFlow(at coord: CLLocationCoordinate2D) {
+    // Check if user has accepted content guidelines first
+    if !UserDefaults.standard.hasAcceptedContentGuidelines {
+      pendingCoordinate = coord
+      showingContentGuidelines = true
+      return
+    }
+
     reportDraft = PinDraft(coordinate: coord)
     reportStep = .type
+  }
+
+  func acceptContentGuidelines() {
+    UserDefaults.standard.hasAcceptedContentGuidelines = true
+    showingContentGuidelines = false
+
+    // Continue with pending pin drop
+    if let coord = pendingCoordinate {
+      initiatePinDropVerification(at: coord)
+    }
   }
 
   // Method to update a pin's video URL
@@ -1507,19 +1638,63 @@ class MapViewModel: NSObject, ObservableObject {
   /// Returns true if the asset is ≤5h old and ≤200ft from the pin location
   @MainActor
   func checkVideoMetadata(asset: PHAsset, pinLocation: CLLocation) async -> Bool {
-    guard let creationDate = asset.creationDate,
-      let assetLocation = asset.location
-    else {
+    guard let creationDate = asset.creationDate else {
+      // If no creation date, allow the video (don't block users)
+      print("[MapViewModel] No creation date available - allowing video")
+      return true
+    }
+
+    // Calculate age in hours
+    let hours = Calendar.current.dateComponents([.hour], from: creationDate, to: Date()).hour ?? 0
+
+    // Check location if available
+    if let assetLocation = asset.location {
+      // Calculate distance in feet
+      let feet = assetLocation.distance(from: pinLocation) * 3.28084
+      let isWithinDistance = feet <= 200
+      let isWithinTimeLimit = hours <= 5
+
+      print(
+        "[MapViewModel] Video metadata check - Age: \(hours)h, Distance: \(Int(feet))ft, TimeOK: \(isWithinTimeLimit), DistanceOK: \(isWithinDistance)"
+      )
+
+      return isWithinTimeLimit && isWithinDistance
+    } else {
+      // If no location data, only check time (be more lenient)
+      let isWithinTimeLimit = hours <= 24  // Extended to 24 hours if no location
+      print(
+        "[MapViewModel] Video metadata check (no location) - Age: \(hours)h, TimeOK: \(isWithinTimeLimit)"
+      )
+      return isWithinTimeLimit
+    }
+  }
+
+  /// Checks if the current user can watch the video for a given pin
+  /// Premium users can watch any pin, non-premium users can only watch pins in their zip code
+  func canWatchVideo(for pin: Pin) -> Bool {
+    guard let userProfile = authManager.currentUserProfile else {
+      print("[MapViewModel] No user profile available for video access check")
       return false
     }
-    // Calculate age in hours
-    let hours =
-      Calendar.current
-      .dateComponents([.hour], from: creationDate, to: Date())
-      .hour ?? Int.max
-    // Calculate distance in feet
-    let feet = assetLocation.distance(from: pinLocation) * 3.28084
-    return hours <= 5 && feet <= 200
+
+    // Premium users can watch any video
+    if userProfile.isPremium {
+      print("[MapViewModel] User is premium - can watch any video")
+      return true
+    }
+
+    // Non-premium users can only watch videos in their original zip code
+    let canWatch = pin.zipCode == userProfile.originalZipCode || pin.zipCode.isEmpty
+    print("[MapViewModel] Non-premium user - can watch video in zip \(pin.zipCode): \(canWatch)")
+    return canWatch
+  }
+
+  /// Shows an alert explaining why video access is restricted
+  @MainActor
+  func showVideoAccessRestrictedAlert() {
+    showAlert = true
+    alertMessage =
+      "Premium subscription required to watch videos outside your zip code. Upgrade to premium to access all incident videos."
   }
 }
 

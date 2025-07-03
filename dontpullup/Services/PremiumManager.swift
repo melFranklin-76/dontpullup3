@@ -3,292 +3,342 @@ import FirebaseFirestore
 import Foundation
 import StoreKit
 
-class PremiumManager: NSObject, ObservableObject {
+@MainActor
+class PremiumManager: ObservableObject {
   static let shared = PremiumManager()
 
-  // Premium product identifier - would be defined in App Store Connect
-  private let zipCodeUnlockProductID = "com.dontpullup.zipcode_upgrade"
+  // Reference to AuthenticationManager for updating user profiles
+  private let authManager = AuthenticationManager.shared
+
+  // Premium product identifier - ONLY ONE PRODUCT TO MANAGE
+  private let zipCodeUnlockProductID = "com.dontpullup.app.zipcode_upgrade"
 
   // Published properties for UI binding
   @Published var isLoading = false
-  @Published var products: [SKProduct] = []
+  @Published var products: [Product] = []
   @Published var purchaseError: String?
   @Published var purchaseSuccess = false
+  @Published var isPremium = false
 
-  // Store the transaction observer
-  private var transactionObserver: Any?
+  // Store transaction listener
+  private var updateListenerTask: Task<Void, Error>?
 
-  override init() {
-    super.init()
-    setupPurchases()
-  }
+  init() {
+    // Start listening for transactions
+    updateListenerTask = listenForTransactions()
 
-  private func setupPurchases() {
-    // Add transaction observer
-    SKPaymentQueue.default().add(self)
-
-    // Load products
-    fetchProducts()
-  }
-
-  func fetchProducts() {
-    isLoading = true
-
-    let request = SKProductsRequest(productIdentifiers: [zipCodeUnlockProductID])
-    request.delegate = self
-    request.start()
-  }
-
-  func purchasePremium() {
-    print("[PremiumManager] purchasePremium() called - products count: \(products.count)")
-
-    // Always print simulator status for debugging
-    #if targetEnvironment(simulator)
-      print("[PremiumManager] Running in simulator environment")
-    #else
-      print("[PremiumManager] Running on a real device")
-    #endif
-
-    guard let product = products.first(where: { $0.productIdentifier == zipCodeUnlockProductID })
-    else {
-      // Special handling for simulator or when products can't load
-      #if targetEnvironment(simulator)
-        print("[PremiumManager] Running in simulator - simulating successful purchase")
-        simulatePurchaseForTesting()
-        return
-      #else
-        print("[PremiumManager] Product not found and not in simulator - showing error")
-        purchaseError = "Product not available. Please try again later."
-        return
-      #endif
+    // Load products and check status
+    Task {
+      await fetchProducts()
+      await checkPurchaseStatus()
     }
-
-    isLoading = true
-    print("[PremiumManager] Found product, initiating purchase: \(product.productIdentifier)")
-
-    // Create payment request
-    let payment = SKPayment(product: product)
-    SKPaymentQueue.default().add(payment)
   }
 
-  // Special method to simulate purchases in simulator
-  func simulatePurchaseForTesting() {
-    print("[PremiumManager] Starting simulated purchase flow")
+  deinit {
+    updateListenerTask?.cancel()
+  }
+
+  // MARK: - Simplified Product Management
+
+  func fetchProducts() async {
     isLoading = true
 
-    // Simulate network delay
-    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-      guard let self = self else { return }
-
-      print("[PremiumManager] Simulated purchase completed")
-
-      // For simulator testing, just simulate success directly
-      // This ensures testing works even without Firebase connection
-      DispatchQueue.main.async {
-        self.purchaseSuccess = true
+    // In test mode, skip product fetching
+    if forceTestMode {
+      print("[PremiumManager] Test mode enabled - skipping real product fetch")
+      await MainActor.run {
         self.isLoading = false
-
-        // Also post the notification for observers
-        NotificationCenter.default.post(
-          name: Notification.Name("UserPremiumStatusUpdated"), object: nil)
-
-        print("[PremiumManager] Simulated purchase notification posted")
-
-        // Print current state for debugging
-        print(
-          "[PremiumManager] Current state - success: \(self.purchaseSuccess), loading: \(self.isLoading), error: \(self.purchaseError ?? "none")"
-        )
       }
-
-      // Also try the real update for completeness
-      self.updateUserPremiumStatus()
-    }
-  }
-
-  func restorePurchases() {
-    isLoading = true
-    SKPaymentQueue.default().restoreCompletedTransactions()
-  }
-
-  // Update user's premium status in Firestore
-  func updateUserPremiumStatus() {
-    guard let currentUser = Auth.auth().currentUser else {
-      print("[PremiumManager] No user logged in")
       return
     }
 
-    let userRef = Firestore.firestore().collection("users").document(currentUser.uid)
+    do {
+      // Request ONLY our single product
+      let storeProducts = try await Product.products(for: [zipCodeUnlockProductID])
 
-    Task {
-      do {
-        try await userRef.updateData(["isPremium": true])
-        print("[PremiumManager] User premium status updated successfully")
+      await MainActor.run {
+        self.products = storeProducts
+        self.isLoading = false
 
-        // Update local state
-        await MainActor.run {
-          self.purchaseSuccess = true
-          self.isLoading = false
+        if storeProducts.isEmpty {
+          print("[PremiumManager] No products found")
+          self.purchaseError = "Premium upgrade temporarily unavailable. Please try again later."
+        } else {
+          print("[PremiumManager] Found \(storeProducts.count) products")
         }
+      }
+    } catch {
+      await MainActor.run {
+        self.isLoading = false
+        self.purchaseError = "Failed to load premium options. Please try again later."
+        print("[PremiumManager] Product request failed: \(error.localizedDescription)")
+      }
+    }
+  }
 
-        // Post notification so other views can update
-        NotificationCenter.default.post(
-          name: Notification.Name("UserPremiumStatusUpdated"), object: nil)
+  // MARK: - Simplified Transaction Management
 
-      } catch {
-        print("[PremiumManager] Error updating user premium status: \(error.localizedDescription)")
+  private func listenForTransactions() -> Task<Void, Error> {
+    return Task.detached {
+      for await result in StoreKit.Transaction.updates {
+        do {
+          let transaction: StoreKit.Transaction
+          switch result {
+          case .verified(let verifiedTransaction):
+            transaction = verifiedTransaction
+          case .unverified:
+            throw StoreError.failedVerification
+          }
 
-        await MainActor.run {
-          self.purchaseError = "Failed to update premium status. Please contact support."
-          self.isLoading = false
+          await self.handleTransaction(transaction)
+          await transaction.finish()
+        } catch {
+          print("[PremiumManager] Transaction failed verification: \(error)")
         }
       }
     }
   }
+
+  // MARK: - Simplified Purchase Flow
+
+  private var forceTestMode: Bool {
+    #if DEBUG
+      print("[PremiumManager] DEBUG build detected - using test mode")
+      return true  // Always use test mode in debug builds
+    #else
+      // Check if this is a TestFlight build
+      if Bundle.main.appStoreReceiptURL?.lastPathComponent == "sandboxReceipt" {
+        print("[PremiumManager] TestFlight build detected - using test mode")
+        return true  // TestFlight users get test mode
+      }
+      print("[PremiumManager] App Store build detected - using real IAP")
+      return false  // Real App Store users get real IAP
+    #endif
+  }
+
+  func purchasePremium() async {
+    print("[PremiumManager] ===== purchasePremium() called =====")
+
+    purchaseError = nil
+
+    // Use test mode in simulator
+    if forceTestMode {
+      print("[PremiumManager] Using test mode - simulating successful purchase")
+      await simulatePurchaseForTesting()
+      return
+    }
+
+    guard let product = products.first(where: { $0.id == zipCodeUnlockProductID }) else {
+      purchaseError = "Premium upgrade not available. Please try again later."
+      return
+    }
+
+    do {
+      isLoading = true
+
+      let result = try await product.purchase()
+
+      switch result {
+      case .success(let verification):
+        let transaction: StoreKit.Transaction
+        switch verification {
+        case .verified(let verifiedTransaction):
+          transaction = verifiedTransaction
+        case .unverified:
+          throw StoreError.failedVerification
+        }
+
+        await handleTransaction(transaction)
+        await transaction.finish()
+        print("[PremiumManager] Purchase successful")
+
+      case .userCancelled:
+        print("[PremiumManager] User cancelled purchase")
+        isLoading = false
+
+      case .pending:
+        print("[PremiumManager] Purchase pending approval")
+        purchaseError = "Purchase is pending approval."
+        isLoading = false
+
+      @unknown default:
+        print("[PremiumManager] Unknown purchase result")
+        purchaseError = "Unknown purchase result. Please try again."
+        isLoading = false
+      }
+    } catch {
+      print("[PremiumManager] Purchase failed: \(error.localizedDescription)")
+      purchaseError = "Purchase failed: \(error.localizedDescription)"
+      isLoading = false
+    }
+  }
+
+  // MARK: - Test Mode Simulation
+
+  func simulatePurchaseForTesting() async {
+    print("[PremiumManager] Starting simulated purchase flow")
+    isLoading = true
+    purchaseError = nil
+    purchaseSuccess = false
+
+    if Auth.auth().currentUser == nil {
+      print("[PremiumManager] No user logged in during simulation")
+      purchaseError = "Error: You must be signed in to make purchases"
+      isLoading = false
+      return
+    }
+
+    // Simulate network delay
+    do {
+      try await Task.sleep(nanoseconds: 1_500_000_000)  // 1.5 seconds
+    } catch {
+      print("[PremiumManager] Simulated purchase was interrupted")
+      isLoading = false
+      return
+    }
+
+    print("[PremiumManager] Simulated purchase completed")
+    await updateUserPremiumStatus()
+
+    // Ensure UI is updated
+    await MainActor.run {
+      self.isPremium = true
+      self.purchaseSuccess = true
+      self.isLoading = false
+      print(
+        "[PremiumManager] Simulated purchase UI updated: isPremium=\(self.isPremium), purchaseSuccess=\(self.purchaseSuccess)"
+      )
+    }
+  }
+
+  // MARK: - Simple Restore
+
+  func restorePurchases() async {
+    print("[PremiumManager] Restoring purchases")
+    isLoading = true
+
+    do {
+      try await AppStore.sync()
+      await checkPurchaseStatus()
+
+      if !isPremium {
+        purchaseError = "No previous purchases found to restore."
+      }
+
+      isLoading = false
+    } catch {
+      print("[PremiumManager] Restore failed: \(error.localizedDescription)")
+      purchaseError = "Failed to restore purchases: \(error.localizedDescription)"
+      isLoading = false
+    }
+  }
+
+  // MARK: - Simple Status Check
+
+  func checkPurchaseStatus() async {
+    if let transaction = await getLatestTransaction() {
+      await handleTransaction(transaction)
+    } else {
+      print("[PremiumManager] No previous transactions found")
+      isPremium = false
+    }
+  }
+
+  private func getLatestTransaction() async -> StoreKit.Transaction? {
+    var latestTransaction: StoreKit.Transaction? = nil
+
+    for await result in StoreKit.Transaction.currentEntitlements {
+      if case .verified(let transaction) = result {
+        if transaction.productID == zipCodeUnlockProductID {
+          latestTransaction = transaction
+        }
+      }
+    }
+
+    return latestTransaction
+  }
+
+  // MARK: - Simple Transaction Handling
+
+  private func handleTransaction(_ transaction: StoreKit.Transaction) async {
+    print("[PremiumManager] Processing transaction: \(transaction.productID)")
+
+    guard transaction.productID == zipCodeUnlockProductID else {
+      print("[PremiumManager] Transaction is not for our product")
+      return
+    }
+
+    guard transaction.revocationDate == nil else {
+      print("[PremiumManager] Transaction was revoked")
+      isPremium = false
+      return
+    }
+
+    if transaction.productType == .nonRenewable && !transaction.isUpgraded {
+      print("[PremiumManager] User is entitled to premium access")
+      await updateUserPremiumStatus()
+    }
+  }
+
+  // MARK: - Simple Status Update
+
+  func updateUserPremiumStatus() async {
+    guard let currentUser = Auth.auth().currentUser else {
+      print("[PremiumManager] No user logged in")
+      purchaseError = "Error: You must be signed in to make purchases"
+      isLoading = false
+      return
+    }
+
+    let db = Firestore.firestore()
+    let userRef = db.collection("users").document(currentUser.uid)
+
+    do {
+      let docSnapshot = try await userRef.getDocument()
+
+      if docSnapshot.exists {
+        try await userRef.updateData(["isPremium": true])
+        print("[PremiumManager] User premium status updated successfully")
+      } else {
+        try await userRef.setData([
+          "id": currentUser.uid,
+          "email": currentUser.email ?? "",
+          "isPremium": true,
+          "createdAt": FieldValue.serverTimestamp(),
+          "lastActive": FieldValue.serverTimestamp(),
+          "zipCode": UserDefaults.standard.string(forKey: "userZipCode") ?? "",
+          "originalZipCode": UserDefaults.standard.string(forKey: "userZipCode") ?? "",
+        ])
+        print("[PremiumManager] Created new user document with premium status")
+      }
+
+      // Update local state
+      isPremium = true
+      purchaseSuccess = true
+      isLoading = false
+
+      // Update AuthenticationManager
+      await authManager.updatePremiumStatus(true)
+
+      // Post notification
+      NotificationCenter.default.post(
+        name: Notification.Name("UserPremiumStatusUpdated"), object: nil)
+
+    } catch {
+      print("[PremiumManager] Error updating user premium status: \(error.localizedDescription)")
+      purchaseError = "Failed to update premium status: \(error.localizedDescription)"
+      isLoading = false
+    }
+  }
+
+  // MARK: - Helper Methods
 
   func resetPurchaseState() {
     purchaseError = nil
     purchaseSuccess = false
   }
 
-  deinit {
-    // Remove transaction observer
-    if transactionObserver != nil {
-      SKPaymentQueue.default().remove(self)
-    }
-  }
-}
-
-// MARK: - SKProductsRequestDelegate
-extension PremiumManager: SKProductsRequestDelegate {
-  func productsRequest(_ request: SKProductsRequest, didReceive response: SKProductsResponse) {
-    DispatchQueue.main.async { [weak self] in
-      guard let self = self else { return }
-
-      self.products = response.products
-      self.isLoading = false
-
-      if response.products.isEmpty {
-        print("[PremiumManager] No products found")
-
-        #if targetEnvironment(simulator)
-          // In simulator, we'll proceed with empty products and use simulation logic
-          print("[PremiumManager] Running in simulator - empty product list is expected")
-        // No error message needed as we'll handle it in the purchasePremium() method
-        #else
-          self.purchaseError = "Premium upgrade temporarily unavailable. Please try again later."
-        #endif
-      } else {
-        print("[PremiumManager] Found \(response.products.count) products")
-      }
-
-      if !response.invalidProductIdentifiers.isEmpty {
-        print("[PremiumManager] Invalid products found: \(response.invalidProductIdentifiers)")
-      }
-    }
-  }
-
-  func request(_ request: SKRequest, didFailWithError error: Error) {
-    DispatchQueue.main.async { [weak self] in
-      guard let self = self else { return }
-
-      self.isLoading = false
-      self.purchaseError = "Failed to load premium options. Please try again later."
-      print("[PremiumManager] Product request failed: \(error.localizedDescription)")
-    }
-  }
-}
-
-// MARK: - SKPaymentTransactionObserver
-extension PremiumManager: SKPaymentTransactionObserver {
-  func paymentQueue(
-    _ queue: SKPaymentQueue, updatedTransactions transactions: [SKPaymentTransaction]
-  ) {
-    for transaction in transactions {
-      switch transaction.transactionState {
-      case .purchased:
-        // Purchase successful
-        handlePurchased(transaction)
-      case .failed:
-        // Purchase failed
-        handleFailed(transaction)
-      case .restored:
-        // Purchase restored
-        handleRestored(transaction)
-      case .deferred, .purchasing:
-        // Still in process, wait
-        break
-      @unknown default:
-        break
-      }
-    }
-  }
-
-  func paymentQueueRestoreCompletedTransactionsFinished(_ queue: SKPaymentQueue) {
-    DispatchQueue.main.async { [weak self] in
-      guard let self = self else { return }
-
-      self.isLoading = false
-      if !self.purchaseSuccess {
-        self.purchaseError = "No previous purchases found to restore."
-      }
-    }
-  }
-
-  func paymentQueue(
-    _ queue: SKPaymentQueue, restoreCompletedTransactionsFailedWithError error: Error
-  ) {
-    DispatchQueue.main.async { [weak self] in
-      guard let self = self else { return }
-
-      self.isLoading = false
-      self.purchaseError = "Failed to restore purchases. Please try again later."
-    }
-  }
-
-  private func handlePurchased(_ transaction: SKPaymentTransaction) {
-    print("[PremiumManager] Transaction purchased: \(transaction.payment.productIdentifier)")
-
-    // Verify the purchase is for our product
-    if transaction.payment.productIdentifier == zipCodeUnlockProductID {
-      // Update user's premium status
-      updateUserPremiumStatus()
-    }
-
-    // Finish the transaction
-    SKPaymentQueue.default().finishTransaction(transaction)
-  }
-
-  private func handleFailed(_ transaction: SKPaymentTransaction) {
-    DispatchQueue.main.async { [weak self] in
-      guard let self = self else { return }
-
-      self.isLoading = false
-      if let error = transaction.error as? SKError {
-        if error.code != .paymentCancelled {
-          self.purchaseError = "Purchase failed: \(error.localizedDescription)"
-        } else {
-          // User canceled, no need for error message
-          print("[PremiumManager] User cancelled purchase")
-        }
-      } else {
-        self.purchaseError = "Purchase failed. Please try again later."
-      }
-
-      // Finish the transaction
-      SKPaymentQueue.default().finishTransaction(transaction)
-    }
-  }
-
-  private func handleRestored(_ transaction: SKPaymentTransaction) {
-    print("[PremiumManager] Transaction restored: \(transaction.payment.productIdentifier)")
-
-    // Verify the purchase is for our product
-    if transaction.payment.productIdentifier == zipCodeUnlockProductID {
-      // Update user's premium status
-      updateUserPremiumStatus()
-    }
-
-    // Finish the transaction
-    SKPaymentQueue.default().finishTransaction(transaction)
+  enum StoreError: Error {
+    case failedVerification
   }
 }

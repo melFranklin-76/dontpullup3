@@ -15,36 +15,188 @@ enum StorageUploader {
   private static var isExpensiveConnection = false
   private static var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
 
+  // Retry configuration
+  private static let maxRetryAttempts = 3
+  private static var currentRetryAttempts = 0
+
   // Actor to isolate non-Sendable AVAssetExportSession
   private actor ExportSessionActor {
-      let session: AVAssetExportSession
-      
-      init(session: AVAssetExportSession) {
-          self.session = session
+    let session: AVAssetExportSession
+
+    init(session: AVAssetExportSession) {
+      self.session = session
+    }
+
+    func getError() -> Error? {
+      return session.error
+    }
+
+    func export() async {
+      await withCheckedContinuation { continuation in
+        session.exportAsynchronously {
+          continuation.resume()
+        }
       }
-      
-      func getError() -> Error? {
-          return session.error
-      }
-      
-      func export() async {
-          await withCheckedContinuation { continuation in
-              session.exportAsynchronously {
-                  continuation.resume()
-              }
-          }
-      }
+    }
   }
 
-  // Initialize network monitoring
+  // Initialize network monitoring with improved error handling
   static func setupNetworkMonitoring() {
     networkMonitor.pathUpdateHandler = { path in
       isExpensiveConnection = path.isExpensive
-      print(
-        "[StorageUploader] Network connection type: \(isExpensiveConnection ? "Cellular/Expensive" : "WiFi/Cheap")"
-      )
+
+      let connectionType =
+        path.usesInterfaceType(.cellular)
+        ? "Cellular/Expensive" : path.usesInterfaceType(.wifi) ? "WiFi/Cheap" : "Other"
+
+      print("[StorageUploader] Network connection type: \(connectionType)")
+
+      // Reset retry counter when network changes to a better state
+      if path.status == .satisfied && !path.isExpensive {
+        currentRetryAttempts = 0
+      }
     }
     networkMonitor.start(queue: .global(qos: .background))
+  }
+
+  // Helper to check if network is suitable for upload
+  static func canUpload() -> Bool {
+    let path = networkMonitor.currentPath
+    return path.status == .satisfied
+  }
+
+  // Helper to determine if we should retry an upload
+  static func shouldRetry() -> Bool {
+    return currentRetryAttempts < maxRetryAttempts && canUpload()
+  }
+
+  // Helper to reset retry counter
+  static func resetRetryCounter() {
+    currentRetryAttempts = 0
+  }
+
+  // Helper to increment retry counter
+  static func incrementRetryCounter() {
+    currentRetryAttempts += 1
+  }
+
+  /// Uploads a video to Firebase Storage with retry logic
+  /// - Parameters:
+  ///   - videoURL: Local URL of the video to upload
+  ///   - progress: Progress handler
+  /// - Returns: Remote URL of the uploaded video
+  /// - Throws: Error if upload fails
+  static func uploadVideo(videoURL: URL, progress: @escaping (Double) -> Void) async throws
+    -> String
+  {
+    print("[StorageUploader] Starting video upload")
+
+    // Check network connectivity first
+    guard canUpload() else {
+      print("[StorageUploader] No network connection available for upload")
+      throw NSError(
+        domain: "StorageUploader",
+        code: 1,
+        userInfo: [
+          NSLocalizedDescriptionKey:
+            "No network connection available. Please try again when you have a stable connection."
+        ]
+      )
+    }
+
+    // Reset retry counter at the beginning of a new upload
+    resetRetryCounter()
+
+    // Try to upload with retry logic
+    do {
+      return try await performUpload(videoURL: videoURL, progress: progress)
+    } catch {
+      print("[StorageUploader] Upload failed: \(error.localizedDescription)")
+
+      // Increment retry counter and check if we should retry
+      incrementRetryCounter()
+
+      if shouldRetry() {
+        print(
+          "[StorageUploader] Retrying upload (attempt \(currentRetryAttempts)/\(maxRetryAttempts))")
+        return try await performUpload(videoURL: videoURL, progress: progress)
+      } else {
+        throw error
+      }
+    }
+  }
+
+  // Actual upload implementation
+  private static func performUpload(videoURL: URL, progress: @escaping (Double) -> Void)
+    async throws -> String
+  {
+    // Rest of the upload implementation remains the same
+    // ... existing upload code ...
+
+    // Start background task to prevent app termination during upload
+    let backgroundTaskID = await MainActor.run {
+      return UIApplication.shared.beginBackgroundTask {
+        // End the task if it expires
+        UIApplication.shared.endBackgroundTask(backgroundTaskID)
+      }
+    }
+
+    do {
+      // Compress video before uploading
+      let compressedURL = try await compressVideo(inputURL: videoURL)
+
+      // Generate a unique filename
+      let filename = UUID().uuidString + ".mp4"
+      let storageRef = Storage.storage().reference().child("videos/\(filename)")
+
+      // Upload the compressed video
+      let metadata = StorageMetadata()
+      metadata.contentType = "video/mp4"
+
+      // Get user ID for storage path
+      let userId = Auth.auth().currentUser?.uid ?? "anonymous"
+
+      // Upload with progress tracking
+      let uploadTask = try await withCheckedThrowingContinuation { continuation in
+        let task = storageRef.putFile(from: compressedURL, metadata: metadata) { metadata, error in
+          if let error = error {
+            continuation.resume(throwing: error)
+          } else if metadata != nil {
+            continuation.resume(returning: ())
+          }
+        }
+
+        // Track progress
+        task.observe(.progress) { snapshot in
+          let percentComplete =
+            Double(snapshot.progress?.completedUnitCount ?? 0)
+            / Double(snapshot.progress?.totalUnitCount ?? 1)
+          progress(percentComplete)
+        }
+      }
+
+      // Get download URL
+      let downloadURL = try await storageRef.downloadURL()
+
+      // Clean up temporary files
+      try? FileManager.default.removeItem(at: compressedURL)
+
+      // End background task
+      await MainActor.run {
+        UIApplication.shared.endBackgroundTask(backgroundTaskID)
+      }
+
+      print("[StorageUploader] Upload successful: \(downloadURL.absoluteString)")
+      return downloadURL.absoluteString
+    } catch {
+      // End background task on error
+      await MainActor.run {
+        UIApplication.shared.endBackgroundTask(backgroundTaskID)
+      }
+
+      print("[StorageUploader] Upload failed: \(error.localizedDescription)")
+      throw error
+    }
   }
 
   /// Compresses a video to reduce file size before uploading
@@ -62,12 +214,44 @@ enum StorageUploader {
 
     let asset = AVAsset(url: inputURL)
 
-    // Use the lowest possible quality preset based on network conditions
-    // Use lower quality preset for cellular connections
-    let preset =
-      NetworkMonitor.shared.isOnCellular
-      ? AVAssetExportPreset640x480  // Very low quality for cellular
-      : AVAssetExportPresetMediumQuality  // Medium quality for WiFi
+    // Check if we can use passthrough for H.264/HEVC videos ≤ 640×480
+    var usePassthrough = false
+
+    // Get video tracks to check codec and dimensions
+    if #available(iOS 16.0, *) {
+      let videoTracks = try await asset.loadTracks(withMediaType: .video)
+      if let videoTrack = videoTracks.first {
+        let naturalSize = try await videoTrack.load(.naturalSize)
+        let formatDescriptions = try await videoTrack.load(.formatDescriptions)
+
+        // Check if dimensions are ≤ 640×480
+        let maxDimension = max(naturalSize.width, naturalSize.height)
+        if maxDimension <= 640 {
+          // Check if codec is H.264 or HEVC
+          for formatDescription in formatDescriptions {
+            let codecType = CMFormatDescriptionGetMediaSubType(formatDescription)
+            if codecType == kCMVideoCodecType_H264 || codecType == kCMVideoCodecType_HEVC {
+              usePassthrough = true
+              print(
+                "[StorageUploader] Using passthrough - video is already H.264/HEVC and ≤640×480")
+              break
+            }
+          }
+        }
+      }
+    }
+
+    // Use the appropriate preset
+    let preset: String
+    if usePassthrough {
+      preset = AVAssetExportPresetPassthrough
+    } else {
+      // Use the lowest possible quality preset based on network conditions
+      preset =
+        NetworkMonitor.shared.isOnCellular
+        ? AVAssetExportPreset640x480  // Very low quality for cellular
+        : AVAssetExportPresetMediumQuality  // Medium quality for WiFi
+    }
 
     // Get video duration using modern API
     var videoDuration: CMTime = .zero
@@ -129,11 +313,6 @@ enum StorageUploader {
     exportSession.outputFileType = AVFileType.mp4
     exportSession.shouldOptimizeForNetworkUse = true
 
-    // Set maximum frame rate to 15fps for smaller file size
-    let videoComposition = AVMutableVideoComposition(propertiesOf: asset)
-    videoComposition.frameDuration = CMTimeMake(value: 1, timescale: 15)  // 15 fps
-    exportSession.videoComposition = videoComposition
-
     // Export the video using a helper function to avoid Sendable warnings
     return try await performExport(exportSession: exportSession, originalFileSize: originalFileSize)
   }
@@ -167,47 +346,47 @@ enum StorageUploader {
 
         // Create an actor to isolate the export session
         let sessionActor = ExportSessionActor(session: self.exportSession)
-        
+
         // Start a task to handle the export
         Task {
-            // Wait for export to complete
-            await sessionActor.export()
-            
-            // Check for errors after export is complete
-            if let error = await sessionActor.getError() {
-                continuation.resume(throwing: error)
-                return
-            }
-            
-            guard FileManager.default.fileExists(atPath: outputURL.path) else {
-                continuation.resume(
-                    throwing: NSError(
-                        domain: "VideoCompression",
-                        code: 3,
-                        userInfo: [
-                            NSLocalizedDescriptionKey:
-                                "Export completed but file doesn't exist."
-                        ]
-                    ))
-                return
-            }
-            
-            // Get compressed file size
-            do {
-                let compressedAttributes = try FileManager.default.attributesOfItem(
-                    atPath: outputURL.path)
-                let compressedSize = compressedAttributes[.size] as? Int64 ?? 0
-                let compressedSizeString = ByteCountFormatter.string(
-                    fromByteCount: compressedSize, countStyle: .file)
-                let compressionRatio = Double(originalSize) / Double(max(1, compressedSize))
-                print("[StorageUploader] Compressed video size: \(compressedSizeString)")
-                print(
-                    "[StorageUploader] Compression ratio: \(String(format: "%.1fx", compressionRatio))")
-            } catch {
-                print("[StorageUploader] Could not get compressed file size: \(error)")
-            }
-            
-            continuation.resume(returning: outputURL)
+          // Wait for export to complete
+          await sessionActor.export()
+
+          // Check for errors after export is complete
+          if let error = await sessionActor.getError() {
+            continuation.resume(throwing: error)
+            return
+          }
+
+          guard FileManager.default.fileExists(atPath: outputURL.path) else {
+            continuation.resume(
+              throwing: NSError(
+                domain: "VideoCompression",
+                code: 3,
+                userInfo: [
+                  NSLocalizedDescriptionKey:
+                    "Export completed but file doesn't exist."
+                ]
+              ))
+            return
+          }
+
+          // Get compressed file size
+          do {
+            let compressedAttributes = try FileManager.default.attributesOfItem(
+              atPath: outputURL.path)
+            let compressedSize = compressedAttributes[.size] as? Int64 ?? 0
+            let compressedSizeString = ByteCountFormatter.string(
+              fromByteCount: compressedSize, countStyle: .file)
+            let compressionRatio = Double(originalSize) / Double(max(1, compressedSize))
+            print("[StorageUploader] Compressed video size: \(compressedSizeString)")
+            print(
+              "[StorageUploader] Compression ratio: \(String(format: "%.1fx", compressionRatio))")
+          } catch {
+            print("[StorageUploader] Could not get compressed file size: \(error)")
+          }
+
+          continuation.resume(returning: outputURL)
         }
       }
     }
@@ -247,6 +426,21 @@ enum StorageUploader {
     }
 
     print("[StorageUploader] Starting upload process for pin: \(pinId)")
+
+    // Check network connectivity before proceeding
+    if !NetworkMonitor.shared.isConnected {
+      // End background task if no network
+      if taskID != .invalid {
+        await UIApplication.shared.endBackgroundTask(taskID)
+      }
+      throw NSError(
+        domain: "StorageUploader",
+        code: 4,
+        userInfo: [
+          NSLocalizedDescriptionKey: "No internet connection. Please try again when connected."
+        ]
+      )
+    }
 
     // Compress the video before uploading
     let compressedURL = try await compressVideo(inputURL: videoURL)
@@ -365,8 +559,8 @@ enum StorageUploader {
     let attributes = try FileManager.default.attributesOfItem(atPath: compressedURL.path)
     let fileSize = attributes[.size] as? Int64 ?? 0
 
-    // Use chunked upload for files larger than 5MB
-    if useChunks && fileSize > 5 * 1024 * 1024 {
+    // Use chunked upload for files larger than 20MB
+    if useChunks && fileSize > 20 * 1024 * 1024 {
       let downloadURL = try await uploadInChunks(videoURL: compressedURL, pinId: pinId)
 
       // Clean up temporary compressed file

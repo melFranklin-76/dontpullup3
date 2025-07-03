@@ -2,12 +2,14 @@ import SwiftUI
 
 struct SettingsView: View {
   @EnvironmentObject private var authState: AuthState
+  @StateObject private var authManager = AuthenticationManager.shared
+  @StateObject private var premiumManager = PremiumManager.shared
   @Environment(\.dismiss) private var dismiss
-  @State private var notificationsEnabled = true
-  @State private var locationTrackingEnabled = true
-  @State private var darkModeEnabled = true
   @State private var hapticFeedbackEnabled = true
   @State private var showResetConfirmation = false
+  @State private var showZipCodeEditor = false
+  @State private var newZipCode = ""
+  @State private var showPremiumView = false
 
   var body: some View {
     NavigationView {
@@ -18,19 +20,6 @@ struct SettingsView: View {
 
           DPUCard {
             // Add more spacing between toggle items
-            Toggle("Enable Notifications", isOn: $notificationsEnabled)
-              .toggleStyle(SwitchToggleStyle(tint: .red))
-              .padding(.vertical, 10)
-
-            Toggle("Location Tracking", isOn: $locationTrackingEnabled)
-              .toggleStyle(SwitchToggleStyle(tint: .red))
-              .padding(.vertical, 10)
-
-            Toggle("Dark Mode", isOn: $darkModeEnabled)
-              .toggleStyle(SwitchToggleStyle(tint: .red))
-              .disabled(true)  // Disabled as app is dark mode only
-              .padding(.vertical, 10)
-
             Toggle("Haptic Feedback", isOn: $hapticFeedbackEnabled)
               .toggleStyle(SwitchToggleStyle(tint: .red))
               .padding(.vertical, 10)
@@ -45,6 +34,86 @@ struct SettingsView: View {
                 .foregroundColor(.blue)
             }
             .padding(.vertical, 10)
+          }
+
+          // PREMIUM section
+          if let userProfile = authManager.currentUserProfile {
+            let _ = print(
+              "[SettingsView] Rendering premium section - isPremium: \(userProfile.isPremium)")
+            DPUSectionHeader(title: userProfile.isPremium ? "PREMIUM SETTINGS" : "UPGRADE")
+
+            DPUCard {
+              if userProfile.isPremium {
+                VStack(spacing: 15) {
+                  // Premium status indicator
+                  HStack {
+                    Image(systemName: "star.fill")
+                      .foregroundColor(.yellow)
+                    Text("Premium Active")
+                      .foregroundColor(.white)
+                      .font(.headline)
+                    Spacer()
+                  }
+
+                  Divider().background(Color.gray.opacity(0.3))
+
+                  // Current zip code display
+                  HStack {
+                    VStack(alignment: .leading) {
+                      Text("Current Zip Code")
+                        .foregroundColor(.gray)
+                        .font(.caption)
+                      Text(userProfile.zipCode)
+                        .foregroundColor(.white)
+                        .font(.title2)
+                    }
+                    Spacer()
+                    Button(action: {
+                      print(
+                        "[SettingsView] Change button tapped - isPremium: \(userProfile.isPremium)")
+                      print("[SettingsView] Current zip: \(userProfile.zipCode)")
+                      newZipCode = userProfile.zipCode
+                      showZipCodeEditor = true
+                    }) {
+                      Text("Change")
+                        .foregroundColor(userProfile.isPremium ? .blue : .gray)
+                    }
+                    .disabled(!userProfile.isPremium)
+                  }
+
+                  // Premium benefits reminder
+                  Text(
+                    "✓ View incidents from all zip codes\n✓ Change location anytime\n✓ Enhanced notifications"
+                  )
+                  .foregroundColor(.gray)
+                  .font(.caption)
+                  .multilineTextAlignment(.leading)
+                }
+                .padding(.vertical, 10)
+              } else {
+                VStack(spacing: 15) {
+                  HStack {
+                    VStack(alignment: .leading) {
+                      Text("Free Plan")
+                        .foregroundColor(.white)
+                        .font(.headline)
+                      Text("Limited to \(userProfile.originalZipCode)")
+                        .foregroundColor(.gray)
+                        .font(.caption)
+                    }
+                    Spacer()
+                    Button(action: {
+                      showPremiumView = true
+                    }) {
+                      Text("Upgrade")
+                        .foregroundColor(.yellow)
+                        .fontWeight(.semibold)
+                    }
+                  }
+                }
+                .padding(.vertical, 10)
+              }
+            }
           }
 
           // APP INFO section
@@ -136,15 +205,43 @@ struct SettingsView: View {
       } message: {
         Text("Are you sure you want to reset all settings to their default values?")
       }
+      .fullScreenCover(isPresented: $showZipCodeEditor) {
+        ZipCodeEditorView(
+          currentZipCode: authManager.currentUserProfile?.zipCode ?? "",
+          onSave: { newZip in
+            print("[SettingsView] Received zip code save request: \(newZip)")
+            Task {
+              do {
+                try await authManager.updateZipCode(newZip)
+                print("[SettingsView] Zip code updated successfully")
+              } catch {
+                print("[SettingsView] Failed to update zip code: \(error.localizedDescription)")
+              }
+            }
+          },
+          onCancel: {
+            print("[SettingsView] Zip code editor dismissed")
+            // Set state after a slight delay to avoid animation conflicts
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            showZipCodeEditor = false
+            }
+          }
+        )
+      }
+      .sheet(isPresented: $showPremiumView) {
+        PremiumView()
+      }
     }
     .navigationViewStyle(.stack)
+    .onAppear {
+      print(
+        "[SettingsView] onAppear – isPremium = \(authManager.currentUserProfile?.isPremium ?? false)"
+      )
+    }
   }
 
   private func resetSettings() {
     // Reset UI state
-    notificationsEnabled = true
-    locationTrackingEnabled = true
-    darkModeEnabled = true
     hapticFeedbackEnabled = true
 
     // Reset all user defaults related to authentication and tutorial
@@ -224,7 +321,7 @@ struct AboutView: View {
           .padding(.bottom, 8)
 
         Text(
-          "If you have any questions, concerns, or suggestions about the app, please contact our support team at support@dontpullup.com."
+          "If you have any questions, concerns, or suggestions about the app, please contact our support team at support@dontpullupongrandma.com."
         )
         .foregroundColor(.white)
         .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly
@@ -245,7 +342,7 @@ struct PrivacyPolicyView: View {
           .fontWeight(.bold)
           .foregroundColor(.white)
 
-        Text("Last updated: June 2023")
+        Text("Last updated: January 2025")
           .font(.caption)
           .foregroundColor(.gray)
 
@@ -340,7 +437,7 @@ struct PrivacyPolicyView: View {
             .padding(.top, 10)
 
           Text(
-            "If you have any questions about this Privacy Policy, please contact us at privacy@dontpullup.com."
+            "If you have any questions about this Privacy Policy, please contact us at support@dontpullupongrandma.com."
           )
           .foregroundColor(.white)
           .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly
@@ -362,7 +459,7 @@ struct TermsOfServiceView: View {
           .fontWeight(.bold)
           .foregroundColor(.white)
 
-        Text("Last updated: June 2023")
+        Text("Last updated: January 2025")
           .font(.caption)
           .foregroundColor(.gray)
 
@@ -457,7 +554,7 @@ struct TermsOfServiceView: View {
             .padding(.top, 10)
 
           Text(
-            "If you have any questions about these Terms of Service, please contact us at terms@dontpullup.com."
+            "If you have any questions about these Terms of Service, please contact us at support@dontpullupongrandma.com."
           )
           .foregroundColor(.white)
           .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly

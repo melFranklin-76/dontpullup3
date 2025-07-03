@@ -13,23 +13,20 @@ struct ProfileView: View {
   @State private var isDeletingAccount = false
   @State private var showDeletionSuccess = false
 
-  // Add zip code editing state
-  @State private var isEditingZipCode = false
-  @State private var newZipCode = ""
-  @State private var isUpdatingZipCode = false
-  @State private var zipCodeError = ""
-  @State private var showZipCodeError = false
-  @State private var originalZipCode = ""
-
   // Premium upgrade state
-  @State private var isPremium = false
   @State private var showPremiumUpgrade = false
   @State private var showPurchaseError = false
   @State private var purchaseErrorMessage = ""
   @State private var showPremiumSuccess = false
 
-  // Access premium manager
+  // Access managers
   @StateObject private var premiumManager = PremiumManager.shared
+  @StateObject private var authManager = AuthenticationManager.shared
+
+  // Computed property for premium status
+  private var isPremium: Bool {
+    return authManager.currentUserProfile?.isPremium ?? false
+  }
 
   var body: some View {
     // Content wrapped in the universal scroll view
@@ -117,7 +114,7 @@ struct ProfileView: View {
           }
         }
 
-        // Zip code section
+        // Location information card (read-only)
         DPUCard {
           VStack(alignment: .leading, spacing: 12) {
             Text("Your Location")
@@ -125,70 +122,36 @@ struct ProfileView: View {
               .foregroundColor(.white)
               .padding(.top, 4)
 
-            Text("Enter your zip code to receive notifications about incidents in your area.")
-              .font(.subheadline)
-              .foregroundColor(.gray)
-              .padding(.bottom, 4)
+            if let profile = authManager.currentUserProfile {
+              HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                  Text("Zip Code")
+                    .font(.subheadline)
+                    .foregroundColor(.gray)
+
+                  Text(profile.zipCode)
+                    .font(.title3)
+                    .foregroundColor(.white)
+                }
+
+                Spacer()
+
+                if isPremium {
+                  Text("Change in Settings")
+                    .font(.caption)
+                    .foregroundColor(.blue)
+                }
+              }
+            }
 
             if !isPremium {
-              Text("Original Zip Code: \(originalZipCode) (Locked)")
-                .font(.caption)
-                .foregroundColor(.orange)
-                .padding(.bottom, 4)
-
               Text("Premium upgrade required to change your zip code")
                 .font(.caption)
                 .foregroundColor(.gray)
-                .padding(.bottom, 8)
+                .padding(.top, 4)
             }
-
-            TextField("Zip Code", text: $newZipCode)
-              .padding()
-              .background(Color.white.opacity(0.1))
-              .cornerRadius(8)
-              .foregroundColor(.white)
-              .keyboardType(.numberPad)
-              .onChange(of: newZipCode) { newValue in
-                // Limit to 5 digits
-                if newValue.count > 5 {
-                  newZipCode = String(newValue.prefix(5))
-                }
-
-                // Filter non-numeric characters
-                newZipCode = newValue.filter { "0123456789".contains($0) }
-              }
-              .disabled(!isPremium && newZipCode == originalZipCode)  // Disable if not premium and equals original
-              .opacity(!isPremium ? 0.6 : 1.0)
-              .padding(.vertical, 4)
-
-            Button(action: {
-              if isEditingZipCode {
-                updateZipCode()
-              } else {
-                startEditingZipCode()
-              }
-            }) {
-              if isUpdatingZipCode {
-                ProgressView()
-                  .progressViewStyle(CircularProgressViewStyle(tint: .white))
-              } else {
-                Text("Update Location")
-                  .fontWeight(.semibold)
-              }
-            }
-            .frame(maxWidth: .infinity)
-            .padding()
-            .background((!isPremium && newZipCode != originalZipCode) ? Color.gray : Color.blue)
-            .foregroundColor(.white)
-            .cornerRadius(8)
-            .disabled(
-              !isPremium && newZipCode != originalZipCode || isUpdatingZipCode
-                || (isEditingZipCode && newZipCode.isEmpty)
-            )
-            .opacity(
-              (!isPremium && newZipCode != originalZipCode) || isUpdatingZipCode
-                || (isEditingZipCode && newZipCode.isEmpty) ? 0.6 : 1.0)
           }
+          .padding(.vertical, 8)
         }
 
         // Account actions
@@ -264,11 +227,6 @@ struct ProfileView: View {
         "Your account and all associated data have been permanently deleted from our servers. Thank you for using Don't Pull Up."
       )
     }
-    .alert("Zip Code Error", isPresented: $showZipCodeError) {
-      Button("OK") {}
-    } message: {
-      Text(zipCodeError)
-    }
     .alert("Purchase Error", isPresented: $showPurchaseError) {
       Button("OK", role: .cancel) {}
     } message: {
@@ -282,105 +240,8 @@ struct ProfileView: View {
       )
     }
     .sheet(isPresented: $showPremiumUpgrade) {
-      PremiumUpgradeView(isPremium: $isPremium, showSuccess: $showPremiumSuccess)
+      PremiumUpgradeView(showSuccess: $showPremiumSuccess)
         .preferredColorScheme(.dark)
-    }
-    .onAppear {
-      loadUserProfile()
-
-      // Observe premium status updates
-      NotificationCenter.default.addObserver(
-        forName: Notification.Name("UserPremiumStatusUpdated"), object: nil, queue: .main
-      ) { _ in
-        self.isPremium = true
-      }
-    }
-  }
-
-  // Method to load the user profile
-  private func loadUserProfile() {
-    // Check if we have a saved zip code for this user
-    if let user = authState.currentUser {
-      Task {
-        do {
-          let docRef = Firestore.firestore().collection("users").document(user.uid)
-          let document = try await docRef.getDocument()
-
-          if let data = document.data() {
-            let zipCode = data["zipCode"] as? String ?? ""
-            let originalZipFromDB = data["originalZipCode"] as? String ?? zipCode
-            let isPremiumFromDB = data["isPremium"] as? Bool ?? false
-
-            // Update UI on main thread
-            await MainActor.run {
-              self.newZipCode = zipCode
-              self.originalZipCode = originalZipFromDB
-              self.isPremium = isPremiumFromDB
-            }
-          }
-        } catch {
-          print("Error loading user profile: \(error.localizedDescription)")
-        }
-      }
-    }
-  }
-
-  // Method to start editing zip code
-  private func startEditingZipCode() {
-    isEditingZipCode = true
-  }
-
-  // Method to update zip code
-  private func updateZipCode() {
-    guard let user = authState.currentUser else {
-      zipCodeError = "You need to be signed in to update your zip code"
-      showZipCodeError = true
-      return
-    }
-
-    // Basic validation
-    if newZipCode.isEmpty {
-      zipCodeError = "Please enter a zip code"
-      showZipCodeError = true
-      return
-    }
-
-    if newZipCode.count != 5 {
-      zipCodeError = "Zip code must be 5 digits"
-      showZipCodeError = true
-      return
-    }
-
-    // Check if user is allowed to update to this zip code
-    if !isPremium && newZipCode != originalZipCode {
-      zipCodeError = "Premium upgrade required to change your zip code"
-      showZipCodeError = true
-      return
-    }
-
-    // Show loading state
-    isUpdatingZipCode = true
-
-    // Update user profile in Firestore
-    let userRef = Firestore.firestore().collection("users").document(user.uid)
-
-    Task {
-      do {
-        try await userRef.setData(["zipCode": newZipCode], merge: true)
-
-        // Update UI on main thread
-        await MainActor.run {
-          isEditingZipCode = false
-          isUpdatingZipCode = false
-        }
-      } catch {
-        // Handle error
-        await MainActor.run {
-          zipCodeError = "Failed to update: \(error.localizedDescription)"
-          showZipCodeError = true
-          isUpdatingZipCode = false
-        }
-      }
     }
   }
 
@@ -450,10 +311,14 @@ struct ProfileView: View {
 // Premium Upgrade View
 struct PremiumUpgradeView: View {
   @StateObject private var premiumManager = PremiumManager.shared
+  @StateObject private var authManager = AuthenticationManager.shared
   @Environment(\.dismiss) private var dismiss
-  @Binding var isPremium: Bool
   @Binding var showSuccess: Bool
   @State private var showPurchaseError = false
+
+  private var isPremium: Bool {
+    return authManager.currentUserProfile?.isPremium ?? false
+  }
 
   var body: some View {
     NavigationView {
@@ -549,7 +414,6 @@ struct PremiumUpgradeView: View {
       .navigationBarTitle("", displayMode: .inline)
       .onChange(of: premiumManager.purchaseSuccess) { success in
         if success {
-          isPremium = true
           showSuccess = true
           DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             dismiss()

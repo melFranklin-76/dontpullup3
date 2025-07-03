@@ -255,8 +255,3 @@ extension Coordinator: PHPickerViewControllerDelegate {
     }
   }
 }
-
-// Custom notification for when incident type is selected
-extension Notification.Name {
-  static let incidentTypeSelected = Notification.Name("incidentTypeSelected")
-}

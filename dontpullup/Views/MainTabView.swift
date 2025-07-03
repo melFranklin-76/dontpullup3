@@ -40,6 +40,11 @@ struct MainTabView: View {
       .sheet(item: $mapViewModel.reportStep) { _ in
         ReportFlowView(viewModel: mapViewModel)
       }
+      .sheet(isPresented: $mapViewModel.showingContentGuidelines) {
+        ContentGuidelinesView(isPresented: $mapViewModel.showingContentGuidelines) {
+          mapViewModel.acceptContentGuidelines()
+        }
+      }
       .onAppear {
         // Check if we should show the tutorial (for anonymous users or first-time users)
         checkTutorialState()
