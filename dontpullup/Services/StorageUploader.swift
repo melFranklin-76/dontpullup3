@@ -104,6 +104,16 @@ enum StorageUploader {
       )
     }
 
+    // Additional network quality check
+    let networkPath = networkMonitor.currentPath
+    if networkPath.isExpensive {
+      print("[StorageUploader] Warning: Using expensive network connection (cellular)")
+    }
+
+    print(
+      "[StorageUploader] Network check passed. Connection type: \(networkPath.usesInterfaceType(.wifi) ? "WiFi" : networkPath.usesInterfaceType(.cellular) ? "Cellular" : "Other")"
+    )
+
     // Reset retry counter at the beginning of a new upload
     resetRetryCounter()
 
@@ -137,7 +147,7 @@ enum StorageUploader {
     let backgroundTaskID = await MainActor.run {
       return UIApplication.shared.beginBackgroundTask {
         // End the task if it expires
-        UIApplication.shared.endBackgroundTask(backgroundTaskID)
+        UIApplication.shared.endBackgroundTask(UIBackgroundTaskIdentifier.invalid)
       }
     }
 
@@ -154,10 +164,12 @@ enum StorageUploader {
       metadata.contentType = "video/mp4"
 
       // Get user ID for storage path
-      let userId = Auth.auth().currentUser?.uid ?? "anonymous"
+      // Not using userId in this function, but keeping for future reference
+      _ = Auth.auth().currentUser?.uid ?? "anonymous"
 
       // Upload with progress tracking
-      let uploadTask = try await withCheckedThrowingContinuation { continuation in
+      _ = try await withCheckedThrowingContinuation {
+        (continuation: CheckedContinuation<Void, Error>) in
         let task = storageRef.putFile(from: compressedURL, metadata: metadata) { metadata, error in
           if let error = error {
             continuation.resume(throwing: error)
@@ -246,11 +258,11 @@ enum StorageUploader {
     if usePassthrough {
       preset = AVAssetExportPresetPassthrough
     } else {
-      // Use the lowest possible quality preset based on network conditions
-      preset =
-        NetworkMonitor.shared.isOnCellular
-        ? AVAssetExportPreset640x480  // Very low quality for cellular
-        : AVAssetExportPresetMediumQuality  // Medium quality for WiFi
+      // Always use a lower quality preset for more reliable uploads
+      // Even on WiFi, we'll use a lower quality to ensure uploads complete
+      preset = AVAssetExportPreset640x480  // Low quality for all network types
+
+      print("[StorageUploader] Using low quality preset for more reliable upload")
     }
 
     // Get video duration using modern API
@@ -474,7 +486,8 @@ enum StorageUploader {
       let uploadTask = storageRef.putFile(from: gifURL, metadata: metadata)
 
       // Wait for upload to complete
-      let result = try await withCheckedThrowingContinuation { continuation in
+      let result = try await withCheckedThrowingContinuation {
+        (continuation: CheckedContinuation<String, Error>) in
         // Set up progress monitoring
         let progressHandle = uploadTask.observe(.progress) { snapshot in
           if let progress = snapshot.progress {
@@ -576,9 +589,9 @@ enum StorageUploader {
 
     // Reference to Firebase Storage
     let storage = Storage.storage()
-    storage.maxUploadRetryTime = 10  // Reduce retry time from default 600 seconds to 10
-    storage.maxOperationRetryTime = 5  // Reduce operation retry time
-    storage.maxDownloadRetryTime = 5  // Reduce download retry time
+    storage.maxUploadRetryTime = 30  // Increase retry time to 30 seconds (was 10)
+    storage.maxOperationRetryTime = 15  // Increase operation retry time to 15 seconds (was 5)
+    storage.maxDownloadRetryTime = 15  // Increase download retry time to 15 seconds (was 5)
 
     // Generate a smaller filename to reduce overhead
     let timestamp = Int(Date().timeIntervalSince1970)
@@ -603,12 +616,24 @@ enum StorageUploader {
     print("[StorageUploader] Upload started at: \(uploadStart)")
 
     // Create a new approach that avoids circular references
-    return try await withCheckedThrowingContinuation { continuation in
+    return try await withCheckedThrowingContinuation {
+      (continuation: CheckedContinuation<String, Error>) in
       // Start the upload task
       let uploadTask = storageRef.putFile(from: compressedURL, metadata: metadata)
 
       // Enable resumable uploads
       uploadTask.enqueue()
+
+      // Add a global timeout for the entire upload process (5 minutes)
+      Task {
+        try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)  // 5 minutes
+        if uploadTask.snapshot.status != .success && uploadTask.snapshot.status != .failure {
+          print(
+            "[StorageUploader] Upload timed out after 5 minutes. Current status: \(uploadTask.snapshot.status.rawValue)"
+          )
+          // Don't cancel the task, just log the timeout - the upload might still complete
+        }
+      }
 
       // Set up progress monitoring without circular references
       let progressHandle = uploadTask.observe(.progress) { snapshot in
@@ -623,26 +648,105 @@ enum StorageUploader {
             object: nil,
             userInfo: ["progress": percentComplete]
           )
+
+          // Check for stalled uploads (if progress hasn't changed in a while)
+          if percentComplete > 0 && percentComplete < 100 {
+            // Add a timeout check - this will help detect stalled uploads
+            Task {
+              try? await Task.sleep(nanoseconds: 30_000_000_000)  // 30 seconds
+              // If we're still at the same progress after 30 seconds, it might be stalled
+              if let currentProgress = snapshot.progress,
+                Double(currentProgress.completedUnitCount) / Double(currentProgress.totalUnitCount)
+                  * 100 == percentComplete
+              {
+                print(
+                  "[StorageUploader] Upload appears to be stalled at \(percentComplete)%. Checking network..."
+                )
+
+                // Check network status
+                if NetworkMonitor.shared.isConnected {
+                  print(
+                    "[StorageUploader] Network is connected but upload is stalled. Continuing to wait..."
+                  )
+                } else {
+                  print("[StorageUploader] Network connection lost during upload.")
+                }
+              }
+            }
+          }
         }
       }
 
       // Create a task to handle the upload completion
       Task {
         do {
+          // Set up a timeout task that will provide diagnostics if the upload takes too long
+          let timeoutTask = Task {
+            do {
+              // Wait for 2 minutes before checking upload status
+              try await Task.sleep(nanoseconds: 2 * 60 * 1_000_000_000)
+
+              // If we get here, the upload is taking too long
+              if !Task.isCancelled {
+                let status = uploadTask.snapshot.status
+                let bytesTransferred = uploadTask.snapshot.progress?.completedUnitCount ?? 0
+                let totalBytes = uploadTask.snapshot.progress?.totalUnitCount ?? 1
+                let percentComplete = Double(bytesTransferred) / Double(totalBytes) * 100
+
+                print(
+                  "[StorageUploader] WARNING: Upload taking longer than expected. Status: \(status.rawValue), Progress: \(String(format: "%.1f", percentComplete))%"
+                )
+                print(
+                  "[StorageUploader] Network status: \(NetworkMonitor.shared.isConnected ? "Connected" : "Disconnected")"
+                )
+
+                // Force a pause and resume to try to kickstart the upload
+                uploadTask.pause()
+
+                // Wait a moment before resuming
+                try await Task.sleep(nanoseconds: 2 * 1_000_000_000)  // 2 seconds
+
+                // Resume the upload
+                uploadTask.resume()
+                print("[StorageUploader] Attempted to restart upload by pausing and resuming")
+              }
+            } catch {
+              // Ignore sleep errors
+            }
+          }
+
           // Wait for the upload to complete using a continuation-based approach
           let snapshot = await withCheckedContinuation {
             (continuation: CheckedContinuation<StorageTaskSnapshot, Never>) in
+
+            // Observe success state
             uploadTask.observe(.success) { snapshot in
+              timeoutTask.cancel()  // Cancel the timeout task
               continuation.resume(returning: snapshot)
             }
 
+            // Observe failure state
             uploadTask.observe(.failure) { snapshot in
+              timeoutTask.cancel()  // Cancel the timeout task
               continuation.resume(returning: snapshot)
+            }
+
+            // Also observe paused state
+            uploadTask.observe(.pause) { snapshot in
+              print(
+                "[StorageUploader] Upload paused at \(snapshot.progress?.fractionCompleted ?? 0)")
+            }
+
+            // Also observe resumed state
+            uploadTask.observe(.resume) { snapshot in
+              print(
+                "[StorageUploader] Upload resumed at \(snapshot.progress?.fractionCompleted ?? 0)")
             }
           }
 
           // Check for errors
           if let error = snapshot.error {
+            print("[StorageUploader] Upload failed with error: \(error.localizedDescription)")
             throw error
           }
 
@@ -883,7 +987,8 @@ enum StorageUploader {
         cgImage = try await generator.image(at: time).image
       } else {
         // Use older API for iOS 15 and below
-        cgImage = try await withCheckedThrowingContinuation { continuation in
+        cgImage = try await withCheckedThrowingContinuation {
+          (continuation: CheckedContinuation<CGImage, Error>) in
           generator.generateCGImageAsynchronously(for: time) { image, actualTime, error in
             if let error = error {
               continuation.resume(throwing: error)
@@ -1024,7 +1129,8 @@ enum StorageUploader {
     let uploadTask = videoRef.putFile(from: fileURL, metadata: metadata)
 
     // Return a URL when complete
-    return try await withCheckedThrowingContinuation { continuation in
+    return try await withCheckedThrowingContinuation {
+      (continuation: CheckedContinuation<URL, Error>) in
       uploadTask.observe(.success) { snapshot in
         // Get download URL
         videoRef.downloadURL { url, error in

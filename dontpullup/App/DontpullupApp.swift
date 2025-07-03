@@ -10,8 +10,11 @@ struct DontpullupApp: App {
   @StateObject private var authState: AuthState  // Declare as @StateObject, initialize in init
 
   init() {
-    // Firebase is configured by the AppDelegate's module load-time initializer
-    // No need to configure Firebase here
+    // Ensure Firebase is configured - this is a safety measure in case AppDelegate initialization hasn't completed
+    if FirebaseApp.app() == nil {
+      FirebaseApp.configure()
+      print("[DontpullupApp] Firebase configured in SwiftUI App init")
+    }
 
     // Initialize AuthState
     self._authState = StateObject(wrappedValue: AuthState.shared)

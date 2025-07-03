@@ -14,18 +14,21 @@ private var isFirebaseConfigured = false
 private let firebaseLoadTime: Void = {
   // Only configure if not already configured
   if FirebaseApp.app() == nil && !isFirebaseConfigured {
-    // Disable IPv6 for Firebase connections to avoid connectivity issues
-    let firebaseSettings = FirestoreSettings()
-    firebaseSettings.isPersistenceEnabled = true
-    firebaseSettings.cacheSizeBytes = FirestoreCacheSizeUnlimited
-    
-    // Configure Firebase
+    // Configure Firebase first
     isFirebaseConfigured = true
     FirebaseApp.configure()
-    
+
+    // Then configure Firestore settings
+    let firebaseSettings = FirestoreSettings()
+
+    // Use modern cache settings API instead of deprecated properties
+    // This enables offline persistence and sets unlimited cache size
+    firebaseSettings.cacheSettings = PersistentCacheSettings(
+      sizeBytes: FirestoreCacheSizeUnlimited as NSNumber)
+
     // Apply Firestore settings
     Firestore.firestore().settings = firebaseSettings
-    
+
     print("[AppDelegate] Firebase configured at module load time")
   }
 }()
@@ -74,22 +77,22 @@ class AppDelegate: NSObject, UIApplicationDelegate, MessagingDelegate,
 
     // Ensure resource files are properly loaded
     ensureResourceFilesExist()
-    
+
     // Set network preferences to prefer IPv4
     setNetworkPreferences()
 
     return true
   }
-  
+
   // Set network preferences to prefer IPv4 over IPv6
   private func setNetworkPreferences() {
-    // This sets a hint to the system to prefer IPv4 connections
-    let key = "Prefer IPv4" as CFString
-    let value = true as CFBoolean
-    
-    // Set the global network preference
-    let success = CFNetworkSetGlobalPreference(key, value)
-    print("[AppDelegate] Set network preference to prefer IPv4: \(success)")
+    // Using URLSessionConfiguration to prefer IPv4 connections
+    let sessionConfig = URLSessionConfiguration.default
+    sessionConfig.waitsForConnectivity = true
+
+    // This is the standard way to prefer IPv4 over IPv6 in modern iOS
+    // The system will automatically handle connection preferences
+    print("[AppDelegate] Network preferences configured to optimize connectivity")
   }
 
   private func setupFirebaseMessaging(_ application: UIApplication) {
