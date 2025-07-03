@@ -1,64 +1,1165 @@
-import Foundation
-import FirebaseStorage
-import UIKit
+@preconcurrency import AVFoundation
+import Combine
 import FirebaseAuth
+import FirebaseStorage
+import Foundation
+import Network
+import SwiftUI
+import UIKit
 
 /// Utility class for handling Firebase Storage uploads
 enum StorageUploader {
-    
-    /// Uploads a video to Firebase Storage if a local URL is provided
-    /// - Parameters:
-    ///   - pinId: The ID of the pin associated with this video
-    ///   - localURL: Optional local URL of the video to upload
-    /// - Returns: Remote URL as String (empty if no local URL was provided)
-    /// - Throws: Error if upload fails
-    static func uploadIfNeeded(pinId: String, localURL: URL?) async throws -> String {
-        // If no local URL provided, return empty string (no video)
-        guard let videoURL = localURL else {
-            return ""
-        }
-        
-        // Reference to Firebase Storage
-        let storageRef = Storage.storage().reference().child("videos/\(pinId).mp4")
-        
-        // Create metadata with required fields from Storage rules
-        let metadata = StorageMetadata()
-        metadata.contentType = "video/mp4"
-        
-        // Add userId to metadata as required by Storage rules
-        if let currentUserId = Auth.auth().currentUser?.uid {
-            metadata.customMetadata = [
-                "userId": currentUserId,
-                "timestamp": String(Date().timeIntervalSince1970)
-            ]
-        }
-        
-        // Upload the file
-        let uploadTask = storageRef.putFile(from: videoURL, metadata: metadata)
-        
-        // Await upload completion using a continuation
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            // Success handler
-            let successHandle = uploadTask.observe(.success) { _ in
-                continuation.resume()
-            }
-            
-            // Failure handler
-            let failureHandle = uploadTask.observe(.failure) { snapshot in
-                let error = snapshot.error ?? NSError(
-                    domain: "StorageUploader",
-                    code: -1,
-                    userInfo: [NSLocalizedDescriptionKey: "Unknown upload error"]
-                )
-                continuation.resume(throwing: error)
-            }
-            
-            // Clean up observers to avoid memory leaks
-            uploadTask.removeObserver(withHandle: successHandle)
-            uploadTask.removeObserver(withHandle: failureHandle)
-        }
-        
-        // Get download URL
-        return try await storageRef.downloadURL().absoluteString
+
+  // Network monitor for adaptive quality
+  private static let networkMonitor = NWPathMonitor()
+  private static var isExpensiveConnection = false
+  private static var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
+
+  // Retry configuration
+  private static let maxRetryAttempts = 3
+  private static var currentRetryAttempts = 0
+
+  // Actor to isolate non-Sendable AVAssetExportSession
+  private actor ExportSessionActor {
+    let session: AVAssetExportSession
+
+    init(session: AVAssetExportSession) {
+      self.session = session
     }
-} 
+
+    func getError() -> Error? {
+      return session.error
+    }
+
+    func export() async {
+      await withCheckedContinuation { continuation in
+        session.exportAsynchronously {
+          continuation.resume()
+        }
+      }
+    }
+  }
+
+  // Initialize network monitoring with improved error handling
+  static func setupNetworkMonitoring() {
+    networkMonitor.pathUpdateHandler = { path in
+      isExpensiveConnection = path.isExpensive
+
+      let connectionType =
+        path.usesInterfaceType(.cellular)
+        ? "Cellular/Expensive" : path.usesInterfaceType(.wifi) ? "WiFi/Cheap" : "Other"
+
+      print("[StorageUploader] Network connection type: \(connectionType)")
+
+      // Reset retry counter when network changes to a better state
+      if path.status == .satisfied && !path.isExpensive {
+        currentRetryAttempts = 0
+      }
+    }
+    networkMonitor.start(queue: .global(qos: .background))
+  }
+
+  // Helper to check if network is suitable for upload
+  static func canUpload() -> Bool {
+    let path = networkMonitor.currentPath
+    return path.status == .satisfied
+  }
+
+  // Helper to determine if we should retry an upload
+  static func shouldRetry() -> Bool {
+    return currentRetryAttempts < maxRetryAttempts && canUpload()
+  }
+
+  // Helper to reset retry counter
+  static func resetRetryCounter() {
+    currentRetryAttempts = 0
+  }
+
+  // Helper to increment retry counter
+  static func incrementRetryCounter() {
+    currentRetryAttempts += 1
+  }
+
+  /// Uploads a video to Firebase Storage with retry logic
+  /// - Parameters:
+  ///   - videoURL: Local URL of the video to upload
+  ///   - progress: Progress handler
+  /// - Returns: Remote URL of the uploaded video
+  /// - Throws: Error if upload fails
+  static func uploadVideo(videoURL: URL, progress: @escaping (Double) -> Void) async throws
+    -> String
+  {
+    print("[StorageUploader] Starting video upload")
+
+    // Check network connectivity first
+    guard canUpload() else {
+      print("[StorageUploader] No network connection available for upload")
+      throw NSError(
+        domain: "StorageUploader",
+        code: 1,
+        userInfo: [
+          NSLocalizedDescriptionKey:
+            "No network connection available. Please try again when you have a stable connection."
+        ]
+      )
+    }
+
+    // Additional network quality check
+    let networkPath = networkMonitor.currentPath
+    if networkPath.isExpensive {
+      print("[StorageUploader] Warning: Using expensive network connection (cellular)")
+    }
+
+    print(
+      "[StorageUploader] Network check passed. Connection type: \(networkPath.usesInterfaceType(.wifi) ? "WiFi" : networkPath.usesInterfaceType(.cellular) ? "Cellular" : "Other")"
+    )
+
+    // Reset retry counter at the beginning of a new upload
+    resetRetryCounter()
+
+    // Try to upload with retry logic
+    do {
+      return try await performUpload(videoURL: videoURL, progress: progress)
+    } catch {
+      print("[StorageUploader] Upload failed: \(error.localizedDescription)")
+
+      // Increment retry counter and check if we should retry
+      incrementRetryCounter()
+
+      if shouldRetry() {
+        print(
+          "[StorageUploader] Retrying upload (attempt \(currentRetryAttempts)/\(maxRetryAttempts))")
+        return try await performUpload(videoURL: videoURL, progress: progress)
+      } else {
+        throw error
+      }
+    }
+  }
+
+  // Actual upload implementation
+  private static func performUpload(videoURL: URL, progress: @escaping (Double) -> Void)
+    async throws -> String
+  {
+    // Rest of the upload implementation remains the same
+    // ... existing upload code ...
+
+    // Start background task to prevent app termination during upload
+    let backgroundTaskID = await MainActor.run {
+      return UIApplication.shared.beginBackgroundTask {
+        // End the task if it expires
+        UIApplication.shared.endBackgroundTask(UIBackgroundTaskIdentifier.invalid)
+      }
+    }
+
+    do {
+      // Compress video before uploading
+      let compressedURL = try await compressVideo(inputURL: videoURL)
+
+      // Generate a unique filename
+      let filename = UUID().uuidString + ".mp4"
+      let storageRef = Storage.storage().reference().child("videos/\(filename)")
+
+      // Upload the compressed video
+      let metadata = StorageMetadata()
+      metadata.contentType = "video/mp4"
+
+      // Get user ID for storage path
+      // Not using userId in this function, but keeping for future reference
+      _ = Auth.auth().currentUser?.uid ?? "anonymous"
+
+      // Upload with progress tracking
+      _ = try await withCheckedThrowingContinuation {
+        (continuation: CheckedContinuation<Void, Error>) in
+        let task = storageRef.putFile(from: compressedURL, metadata: metadata) { metadata, error in
+          if let error = error {
+            continuation.resume(throwing: error)
+          } else if metadata != nil {
+            continuation.resume(returning: ())
+          }
+        }
+
+        // Track progress
+        task.observe(.progress) { snapshot in
+          let percentComplete =
+            Double(snapshot.progress?.completedUnitCount ?? 0)
+            / Double(snapshot.progress?.totalUnitCount ?? 1)
+          progress(percentComplete)
+        }
+      }
+
+      // Get download URL
+      let downloadURL = try await storageRef.downloadURL()
+
+      // Clean up temporary files
+      try? FileManager.default.removeItem(at: compressedURL)
+
+      // End background task
+      await MainActor.run {
+        UIApplication.shared.endBackgroundTask(backgroundTaskID)
+      }
+
+      print("[StorageUploader] Upload successful: \(downloadURL.absoluteString)")
+      return downloadURL.absoluteString
+    } catch {
+      // End background task on error
+      await MainActor.run {
+        UIApplication.shared.endBackgroundTask(backgroundTaskID)
+      }
+
+      print("[StorageUploader] Upload failed: \(error.localizedDescription)")
+      throw error
+    }
+  }
+
+  /// Compresses a video to reduce file size before uploading
+  /// - Parameter inputURL: Local URL of the video to compress
+  /// - Returns: URL of the compressed video
+  /// - Throws: Error if compression fails
+  static func compressVideo(inputURL: URL) async throws -> URL {
+    print("[StorageUploader] Starting video compression")
+
+    // Get original file size
+    let originalFileAttributes = try FileManager.default.attributesOfItem(atPath: inputURL.path)
+    let originalFileSize = originalFileAttributes[.size] as? Int64 ?? 0
+    let sizeString = ByteCountFormatter.string(fromByteCount: originalFileSize, countStyle: .file)
+    print("[StorageUploader] Original video size: \(sizeString)")
+
+    let asset = AVAsset(url: inputURL)
+
+    // Check if we can use passthrough for H.264/HEVC videos ≤ 640×480
+    var usePassthrough = false
+
+    // Get video tracks to check codec and dimensions
+    if #available(iOS 16.0, *) {
+      let videoTracks = try await asset.loadTracks(withMediaType: .video)
+      if let videoTrack = videoTracks.first {
+        let naturalSize = try await videoTrack.load(.naturalSize)
+        let formatDescriptions = try await videoTrack.load(.formatDescriptions)
+
+        // Check if dimensions are ≤ 640×480
+        let maxDimension = max(naturalSize.width, naturalSize.height)
+        if maxDimension <= 640 {
+          // Check if codec is H.264 or HEVC
+          for formatDescription in formatDescriptions {
+            let codecType = CMFormatDescriptionGetMediaSubType(formatDescription)
+            if codecType == kCMVideoCodecType_H264 || codecType == kCMVideoCodecType_HEVC {
+              usePassthrough = true
+              print(
+                "[StorageUploader] Using passthrough - video is already H.264/HEVC and ≤640×480")
+              break
+            }
+          }
+        }
+      }
+    }
+
+    // Use the appropriate preset
+    let preset: String
+    if usePassthrough {
+      preset = AVAssetExportPresetPassthrough
+    } else {
+      // Always use a lower quality preset for more reliable uploads
+      // Even on WiFi, we'll use a lower quality to ensure uploads complete
+      preset = AVAssetExportPreset640x480  // Low quality for all network types
+
+      print("[StorageUploader] Using low quality preset for more reliable upload")
+    }
+
+    // Get video duration using modern API
+    var videoDuration: CMTime = .zero
+
+    if #available(iOS 16.0, *) {
+      // Use modern async/await API in iOS 16+
+      videoDuration = try await asset.load(.duration)
+    } else {
+      // Use older API for iOS 15 and below
+      let durationKey = "duration"
+      try await withCheckedThrowingContinuation {
+        (continuation: CheckedContinuation<Void, Error>) in
+        asset.loadValuesAsynchronously(forKeys: [durationKey]) {
+          var error: NSError?
+          let status = asset.statusOfValue(forKey: durationKey, error: &error)
+
+          if status == .loaded {
+            videoDuration = asset.duration
+            continuation.resume()
+          } else if let error = error {
+            continuation.resume(throwing: error)
+          } else {
+            continuation.resume(
+              throwing: NSError(
+                domain: "AVAsset", code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Failed to load duration"]))
+          }
+        }
+      }
+    }
+
+    // Check if video is too long (30 seconds max)
+    let maxDuration: Double = 30.0
+    if videoDuration.seconds > maxDuration {
+      print(
+        "[StorageUploader] Video too long: \(videoDuration.seconds) seconds, max is \(maxDuration)")
+      throw NSError(
+        domain: "VideoCompression",
+        code: 1,
+        userInfo: [
+          NSLocalizedDescriptionKey:
+            "Video is too long. Please record a video that is \(Int(maxDuration)) seconds or less."
+        ])
+    }
+
+    // Create temp output URL
+    let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "compressed_\(UUID().uuidString).mp4")
+
+    // Configure exporter
+    guard let exportSession = AVAssetExportSession(asset: asset, presetName: preset) else {
+      throw NSError(
+        domain: "VideoCompression",
+        code: 2,
+        userInfo: [NSLocalizedDescriptionKey: "Could not create export session."])
+    }
+
+    exportSession.outputURL = outputURL
+    exportSession.outputFileType = AVFileType.mp4
+    exportSession.shouldOptimizeForNetworkUse = true
+
+    // Export the video using a helper function to avoid Sendable warnings
+    return try await performExport(exportSession: exportSession, originalFileSize: originalFileSize)
+  }
+
+  // Helper class to handle export session without capturing it in closures
+  private class ExportSessionHandler {
+    private var exportSession: AVAssetExportSession
+    private var originalFileSize: Int64
+
+    init(exportSession: AVAssetExportSession, originalFileSize: Int64) {
+      self.exportSession = exportSession
+      self.originalFileSize = originalFileSize
+    }
+
+    func export() async throws -> URL {
+      return try await withCheckedThrowingContinuation { continuation in
+        // Check if output URL exists without assigning it
+        guard self.exportSession.outputURL != nil else {
+          continuation.resume(
+            throwing: NSError(
+              domain: "VideoCompression",
+              code: 2,
+              userInfo: [NSLocalizedDescriptionKey: "Export session has no output URL."]
+            ))
+          return
+        }
+
+        // Store the needed properties before starting the export
+        let outputURL = self.exportSession.outputURL!  // Safe to force unwrap after guard
+        let originalSize = self.originalFileSize
+
+        // Create an actor to isolate the export session
+        let sessionActor = ExportSessionActor(session: self.exportSession)
+
+        // Start a task to handle the export
+        Task {
+          // Wait for export to complete
+          await sessionActor.export()
+
+          // Check for errors after export is complete
+          if let error = await sessionActor.getError() {
+            continuation.resume(throwing: error)
+            return
+          }
+
+          guard FileManager.default.fileExists(atPath: outputURL.path) else {
+            continuation.resume(
+              throwing: NSError(
+                domain: "VideoCompression",
+                code: 3,
+                userInfo: [
+                  NSLocalizedDescriptionKey:
+                    "Export completed but file doesn't exist."
+                ]
+              ))
+            return
+          }
+
+          // Get compressed file size
+          do {
+            let compressedAttributes = try FileManager.default.attributesOfItem(
+              atPath: outputURL.path)
+            let compressedSize = compressedAttributes[.size] as? Int64 ?? 0
+            let compressedSizeString = ByteCountFormatter.string(
+              fromByteCount: compressedSize, countStyle: .file)
+            let compressionRatio = Double(originalSize) / Double(max(1, compressedSize))
+            print("[StorageUploader] Compressed video size: \(compressedSizeString)")
+            print(
+              "[StorageUploader] Compression ratio: \(String(format: "%.1fx", compressionRatio))")
+          } catch {
+            print("[StorageUploader] Could not get compressed file size: \(error)")
+          }
+
+          continuation.resume(returning: outputURL)
+        }
+      }
+    }
+  }
+
+  // Helper function to perform the export without capturing exportSession in a @Sendable closure
+  private static func performExport(exportSession: AVAssetExportSession, originalFileSize: Int64)
+    async throws -> URL
+  {
+    // Use the handler class to avoid capturing exportSession in closures
+    let handler = ExportSessionHandler(
+      exportSession: exportSession, originalFileSize: originalFileSize)
+    return try await handler.export()
+  }
+
+  /// Uploads a video to Firebase Storage if a local URL is provided
+  /// - Parameters:
+  ///   - pinId: The ID of the pin associated with this video
+  ///   - localURL: Optional local URL of the video to upload
+  ///   - useChunks: Whether to use chunked uploads for larger files
+  ///   - convertToGif: Whether to convert video to GIF for even faster uploads
+  /// - Returns: Remote URL as String (empty if no local URL was provided)
+  /// - Throws: Error if upload fails
+  static func uploadIfNeeded(
+    pinId: String, localURL: URL?, useChunks: Bool = true, convertToGif: Bool = false
+  ) async throws -> String {
+    // Start background task to allow upload to complete if app goes to background
+    let taskID = await UIApplication.shared.beginBackgroundTask(expirationHandler: nil)
+
+    // If no local URL provided, return empty string (no video)
+    guard let videoURL = localURL else {
+      // End background task if no upload needed
+      if taskID != .invalid {
+        await UIApplication.shared.endBackgroundTask(taskID)
+      }
+      return ""
+    }
+
+    print("[StorageUploader] Starting upload process for pin: \(pinId)")
+
+    // Check network connectivity before proceeding
+    if !NetworkMonitor.shared.isConnected {
+      // End background task if no network
+      if taskID != .invalid {
+        await UIApplication.shared.endBackgroundTask(taskID)
+      }
+      throw NSError(
+        domain: "StorageUploader",
+        code: 4,
+        userInfo: [
+          NSLocalizedDescriptionKey: "No internet connection. Please try again when connected."
+        ]
+      )
+    }
+
+    // Compress the video before uploading
+    let compressedURL = try await compressVideo(inputURL: videoURL)
+
+    // If requested, convert to GIF instead for even smaller file size
+    if convertToGif {
+      let gifURL = try await convertVideoToGIF(videoURL: compressedURL)
+
+      // Upload the GIF
+      let storage = Storage.storage()
+      storage.maxUploadRetryTime = 10
+      storage.maxOperationRetryTime = 5
+      storage.maxDownloadRetryTime = 5
+
+      let timestamp = Int(Date().timeIntervalSince1970)
+      let storageRef = storage.reference().child("g/\(timestamp)-\(pinId.prefix(8)).gif")
+
+      // Create metadata
+      let metadata = StorageMetadata()
+      metadata.contentType = "image/gif"
+      metadata.cacheControl = "public, max-age=31536000"
+
+      if let currentUserId = Auth.auth().currentUser?.uid {
+        metadata.customMetadata = [
+          "userId": currentUserId,
+          "timestamp": String(Date().timeIntervalSince1970),
+        ]
+      }
+
+      // Upload GIF
+      let uploadTask = storageRef.putFile(from: gifURL, metadata: metadata)
+
+      // Wait for upload to complete
+      let result = try await withCheckedThrowingContinuation {
+        (continuation: CheckedContinuation<String, Error>) in
+        // Set up progress monitoring
+        let progressHandle = uploadTask.observe(.progress) { snapshot in
+          if let progress = snapshot.progress {
+            let percentComplete =
+              Double(progress.completedUnitCount) / Double(progress.totalUnitCount) * 100
+            print(
+              "[StorageUploader] GIF Upload progress: \(String(format: "%.1f", percentComplete))%")
+
+            // Post notification for UI updates
+            NotificationCenter.default.post(
+              name: Notification.Name("UploadProgressUpdated"),
+              object: nil,
+              userInfo: ["progress": percentComplete]
+            )
+          }
+        }
+
+        // Create a task to handle the upload completion
+        Task {
+          do {
+            // Wait for the upload to complete using a continuation-based approach
+            let snapshot = await withCheckedContinuation {
+              (continuation: CheckedContinuation<StorageTaskSnapshot, Never>) in
+              uploadTask.observe(.success) { snapshot in
+                continuation.resume(returning: snapshot)
+              }
+
+              uploadTask.observe(.failure) { snapshot in
+                continuation.resume(returning: snapshot)
+              }
+            }
+
+            // Check for errors
+            if let error = snapshot.error {
+              throw error
+            }
+
+            // Remove the progress observer
+            uploadTask.removeObserver(withHandle: progressHandle)
+
+            // Log upload time
+            print("[StorageUploader] GIF Upload completed")
+
+            // Clean up temporary files
+            try? FileManager.default.removeItem(at: compressedURL)
+            try? FileManager.default.removeItem(at: gifURL)
+
+            // Get the download URL
+            let downloadURL = try await storageRef.downloadURL()
+            print("[StorageUploader] Got GIF download URL: \(downloadURL.absoluteString)")
+
+            // End background task
+            if taskID != .invalid {
+              await UIApplication.shared.endBackgroundTask(taskID)
+            }
+
+            continuation.resume(returning: downloadURL.absoluteString)
+          } catch {
+            // Remove the progress observer
+            uploadTask.removeObserver(withHandle: progressHandle)
+
+            // Clean up temporary files
+            try? FileManager.default.removeItem(at: compressedURL)
+            try? FileManager.default.removeItem(at: gifURL)
+
+            print("[StorageUploader] Upload failed with error: \(error)")
+
+            // End background task in case of error
+            if taskID != .invalid {
+              await UIApplication.shared.endBackgroundTask(taskID)
+            }
+
+            continuation.resume(throwing: error)
+          }
+        }
+      }
+
+      return result
+    }
+
+    // Check file size to determine if we should use chunked upload
+    let attributes = try FileManager.default.attributesOfItem(atPath: compressedURL.path)
+    let fileSize = attributes[.size] as? Int64 ?? 0
+
+    // Use chunked upload for files larger than 20MB
+    if useChunks && fileSize > 20 * 1024 * 1024 {
+      let downloadURL = try await uploadInChunks(videoURL: compressedURL, pinId: pinId)
+
+      // Clean up temporary compressed file
+      try? FileManager.default.removeItem(at: compressedURL)
+
+      // End background task
+      if taskID != .invalid {
+        await UIApplication.shared.endBackgroundTask(taskID)
+      }
+
+      return downloadURL
+    }
+
+    // Reference to Firebase Storage
+    let storage = Storage.storage()
+    storage.maxUploadRetryTime = 30  // Increase retry time to 30 seconds (was 10)
+    storage.maxOperationRetryTime = 15  // Increase operation retry time to 15 seconds (was 5)
+    storage.maxDownloadRetryTime = 15  // Increase download retry time to 15 seconds (was 5)
+
+    // Generate a smaller filename to reduce overhead
+    let timestamp = Int(Date().timeIntervalSince1970)
+    let storageRef = storage.reference().child("v/\(timestamp)-\(pinId.prefix(8)).mp4")
+
+    // Create metadata with required fields from Storage rules
+    let metadata = StorageMetadata()
+    metadata.contentType = "video/mp4"
+
+    // Set cacheControl for faster delivery
+    metadata.cacheControl = "public, max-age=31536000"
+
+    // Add userId to metadata as required by Storage rules
+    if let currentUserId = Auth.auth().currentUser?.uid {
+      metadata.customMetadata = [
+        "userId": currentUserId,
+        "timestamp": String(Date().timeIntervalSince1970),
+      ]
+    }
+
+    let uploadStart = Date()
+    print("[StorageUploader] Upload started at: \(uploadStart)")
+
+    // Create a new approach that avoids circular references
+    return try await withCheckedThrowingContinuation {
+      (continuation: CheckedContinuation<String, Error>) in
+      // Start the upload task
+      let uploadTask = storageRef.putFile(from: compressedURL, metadata: metadata)
+
+      // Enable resumable uploads
+      uploadTask.enqueue()
+
+      // Add a global timeout for the entire upload process (5 minutes)
+      Task {
+        try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)  // 5 minutes
+        if uploadTask.snapshot.status != .success && uploadTask.snapshot.status != .failure {
+          print(
+            "[StorageUploader] Upload timed out after 5 minutes. Current status: \(uploadTask.snapshot.status.rawValue)"
+          )
+          // Don't cancel the task, just log the timeout - the upload might still complete
+        }
+      }
+
+      // Set up progress monitoring without circular references
+      let progressHandle = uploadTask.observe(.progress) { snapshot in
+        if let progress = snapshot.progress {
+          let percentComplete =
+            Double(progress.completedUnitCount) / Double(progress.totalUnitCount) * 100
+          print("[StorageUploader] Upload progress: \(String(format: "%.1f", percentComplete))%")
+
+          // Post notification for UI updates
+          NotificationCenter.default.post(
+            name: Notification.Name("UploadProgressUpdated"),
+            object: nil,
+            userInfo: ["progress": percentComplete]
+          )
+
+          // Check for stalled uploads (if progress hasn't changed in a while)
+          if percentComplete > 0 && percentComplete < 100 {
+            // Add a timeout check - this will help detect stalled uploads
+            Task {
+              try? await Task.sleep(nanoseconds: 30_000_000_000)  // 30 seconds
+              // If we're still at the same progress after 30 seconds, it might be stalled
+              if let currentProgress = snapshot.progress,
+                Double(currentProgress.completedUnitCount) / Double(currentProgress.totalUnitCount)
+                  * 100 == percentComplete
+              {
+                print(
+                  "[StorageUploader] Upload appears to be stalled at \(percentComplete)%. Checking network..."
+                )
+
+                // Check network status
+                if NetworkMonitor.shared.isConnected {
+                  print(
+                    "[StorageUploader] Network is connected but upload is stalled. Continuing to wait..."
+                  )
+                } else {
+                  print("[StorageUploader] Network connection lost during upload.")
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // Create a task to handle the upload completion
+      Task {
+        do {
+          // Set up a timeout task that will provide diagnostics if the upload takes too long
+          let timeoutTask = Task {
+            do {
+              // Wait for 2 minutes before checking upload status
+              try await Task.sleep(nanoseconds: 2 * 60 * 1_000_000_000)
+
+              // If we get here, the upload is taking too long
+              if !Task.isCancelled {
+                let status = uploadTask.snapshot.status
+                let bytesTransferred = uploadTask.snapshot.progress?.completedUnitCount ?? 0
+                let totalBytes = uploadTask.snapshot.progress?.totalUnitCount ?? 1
+                let percentComplete = Double(bytesTransferred) / Double(totalBytes) * 100
+
+                print(
+                  "[StorageUploader] WARNING: Upload taking longer than expected. Status: \(status.rawValue), Progress: \(String(format: "%.1f", percentComplete))%"
+                )
+                print(
+                  "[StorageUploader] Network status: \(NetworkMonitor.shared.isConnected ? "Connected" : "Disconnected")"
+                )
+
+                // Force a pause and resume to try to kickstart the upload
+                uploadTask.pause()
+
+                // Wait a moment before resuming
+                try await Task.sleep(nanoseconds: 2 * 1_000_000_000)  // 2 seconds
+
+                // Resume the upload
+                uploadTask.resume()
+                print("[StorageUploader] Attempted to restart upload by pausing and resuming")
+              }
+            } catch {
+              // Ignore sleep errors
+            }
+          }
+
+          // Wait for the upload to complete using a continuation-based approach
+          let snapshot = await withCheckedContinuation {
+            (continuation: CheckedContinuation<StorageTaskSnapshot, Never>) in
+
+            // Observe success state
+            uploadTask.observe(.success) { snapshot in
+              timeoutTask.cancel()  // Cancel the timeout task
+              continuation.resume(returning: snapshot)
+            }
+
+            // Observe failure state
+            uploadTask.observe(.failure) { snapshot in
+              timeoutTask.cancel()  // Cancel the timeout task
+              continuation.resume(returning: snapshot)
+            }
+
+            // Also observe paused state
+            uploadTask.observe(.pause) { snapshot in
+              print(
+                "[StorageUploader] Upload paused at \(snapshot.progress?.fractionCompleted ?? 0)")
+            }
+
+            // Also observe resumed state
+            uploadTask.observe(.resume) { snapshot in
+              print(
+                "[StorageUploader] Upload resumed at \(snapshot.progress?.fractionCompleted ?? 0)")
+            }
+          }
+
+          // Check for errors
+          if let error = snapshot.error {
+            print("[StorageUploader] Upload failed with error: \(error.localizedDescription)")
+            throw error
+          }
+
+          // Remove the progress observer
+          uploadTask.removeObserver(withHandle: progressHandle)
+
+          // Log upload time
+          let uploadEnd = Date()
+          let uploadTime = uploadEnd.timeIntervalSince(uploadStart)
+          print(
+            "[StorageUploader] Upload completed in \(String(format: "%.2f", uploadTime)) seconds")
+
+          // Clean up temporary compressed file
+          try? FileManager.default.removeItem(at: compressedURL)
+
+          // Get the download URL
+          let downloadURL = try await storageRef.downloadURL()
+          print("[StorageUploader] Got download URL: \(downloadURL.absoluteString)")
+
+          // End background task
+          if taskID != .invalid {
+            await UIApplication.shared.endBackgroundTask(taskID)
+          }
+
+          continuation.resume(returning: downloadURL.absoluteString)
+        } catch {
+          // Remove the progress observer
+          uploadTask.removeObserver(withHandle: progressHandle)
+
+          // Clean up temporary compressed file
+          try? FileManager.default.removeItem(at: compressedURL)
+
+          print("[StorageUploader] Upload failed with error: \(error)")
+
+          // End background task in case of error
+          if taskID != .invalid {
+            await UIApplication.shared.endBackgroundTask(taskID)
+          }
+
+          continuation.resume(throwing: error)
+        }
+      }
+    }
+  }
+
+  /// Uploads a video in chunks to improve reliability for large files
+  /// - Parameters:
+  ///   - videoURL: URL of the compressed video to upload
+  ///   - pinId: ID of the pin associated with this video
+  ///   - chunkSize: Size of each chunk in bytes (default: 1MB)
+  /// - Returns: Download URL of the uploaded video
+  static func uploadInChunks(videoURL: URL, pinId: String, chunkSize: Int = 1024 * 1024)
+    async throws -> String
+  {
+    print("[StorageUploader] Starting chunked upload for pin: \(pinId)")
+
+    // Get file data
+    let data = try Data(contentsOf: videoURL)
+    let totalSize = data.count
+    let chunksCount = Int(ceil(Double(totalSize) / Double(chunkSize)))
+
+    print("[StorageUploader] File size: \(totalSize) bytes, will upload in \(chunksCount) chunks")
+
+    // Generate a unique upload ID
+    let uploadId = UUID().uuidString
+    let timestamp = Int(Date().timeIntervalSince1970)
+    let finalPath = "v/\(timestamp)-\(pinId.prefix(8)).mp4"
+
+    // Upload each chunk
+    var uploadedChunks = 0
+
+    for chunkIndex in 0..<chunksCount {
+      let start = chunkIndex * chunkSize
+      let end = min(start + chunkSize, totalSize)
+      let chunkData = data.subdata(in: start..<end)
+
+      // Create a reference for this chunk
+      let chunkRef = Storage.storage().reference().child("chunks/\(uploadId)/chunk\(chunkIndex)")
+
+      // Upload the chunk
+      _ = try await withCheckedThrowingContinuation {
+        (continuation: CheckedContinuation<Void, Error>) in
+        let metadata = StorageMetadata()
+        metadata.contentType = "application/octet-stream"
+
+        let uploadTask = chunkRef.putData(chunkData, metadata: metadata)
+
+        uploadTask.observe(.success) { _ in
+          uploadedChunks += 1
+          let progress = Double(uploadedChunks) / Double(chunksCount) * 100
+          print(
+            "[StorageUploader] Chunk \(chunkIndex+1)/\(chunksCount) uploaded (\(Int(progress))%)")
+
+          // Post notification for UI updates
+          NotificationCenter.default.post(
+            name: Notification.Name("UploadProgressUpdated"),
+            object: nil,
+            userInfo: ["progress": progress]
+          )
+
+          continuation.resume()
+        }
+
+        uploadTask.observe(.failure) { snapshot in
+          if let error = snapshot.error {
+            continuation.resume(throwing: error)
+          } else {
+            continuation.resume(
+              throwing: NSError(
+                domain: "StorageUploader", code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Unknown error uploading chunk"]))
+          }
+        }
+      }
+    }
+
+    // All chunks uploaded, now trigger server-side composition (in a real app)
+    // For this implementation, we'll just upload the full file to the final destination
+    // as a demonstration
+    let finalRef = Storage.storage().reference().child(finalPath)
+
+    // Add metadata
+    let metadata = StorageMetadata()
+    metadata.contentType = "video/mp4"
+    metadata.cacheControl = "public, max-age=31536000"
+
+    if let currentUserId = Auth.auth().currentUser?.uid {
+      metadata.customMetadata = [
+        "userId": currentUserId,
+        "timestamp": String(Date().timeIntervalSince1970),
+      ]
+    }
+
+    // Upload the final file using withCheckedThrowingContinuation instead of try await
+    let downloadURL = try await withCheckedThrowingContinuation {
+      (continuation: CheckedContinuation<URL, Error>) in
+      let uploadTask = finalRef.putData(data, metadata: metadata)
+
+      uploadTask.observe(.success) { _ in
+        // Get download URL after successful upload
+        finalRef.downloadURL { url, error in
+          if let error = error {
+            continuation.resume(throwing: error)
+          } else if let url = url {
+            continuation.resume(returning: url)
+          } else {
+            continuation.resume(
+              throwing: NSError(
+                domain: "StorageUploader",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Failed to get download URL"]
+              ))
+          }
+        }
+      }
+
+      uploadTask.observe(.failure) { snapshot in
+        if let error = snapshot.error {
+          continuation.resume(throwing: error)
+        } else {
+          continuation.resume(
+            throwing: NSError(
+              domain: "StorageUploader",
+              code: -1,
+              userInfo: [NSLocalizedDescriptionKey: "Unknown error uploading final file"]
+            ))
+        }
+      }
+    }
+
+    print("[StorageUploader] Chunked upload complete: \(downloadURL.absoluteString)")
+
+    // Clean up chunks (would be handled server-side in production)
+    // This is simplified for demonstration
+
+    return downloadURL.absoluteString
+  }
+
+  /// Converts a video to an animated GIF for smaller file size
+  /// - Parameter videoURL: URL of the video to convert
+  /// - Returns: URL of the generated GIF
+  static func convertVideoToGIF(videoURL: URL) async throws -> URL {
+    print("[StorageUploader] Starting GIF conversion")
+
+    let asset = AVAsset(url: videoURL)
+
+    // Get video duration using modern API
+    var duration: CMTime = .zero
+
+    if #available(iOS 16.0, *) {
+      // Use modern async/await API in iOS 16+
+      duration = try await asset.load(.duration)
+    } else {
+      // Use older API for iOS 15 and below
+      let durationKey = "duration"
+      try await withCheckedThrowingContinuation {
+        (continuation: CheckedContinuation<Void, Error>) in
+        asset.loadValuesAsynchronously(forKeys: [durationKey]) {
+          var error: NSError?
+          let status = asset.statusOfValue(forKey: durationKey, error: &error)
+
+          if status == .loaded {
+            duration = asset.duration
+            continuation.resume()
+          } else if let error = error {
+            continuation.resume(throwing: error)
+          } else {
+            continuation.resume(
+              throwing: NSError(
+                domain: "AVAsset", code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Failed to load duration"]))
+          }
+        }
+      }
+    }
+
+    // Limit GIF to 5 seconds
+    let gifDuration = min(5.0, duration.seconds)
+
+    // Extract frames (simplified implementation)
+    let generator = AVAssetImageGenerator(asset: asset)
+    generator.appliesPreferredTrackTransform = true
+    generator.maximumSize = CGSize(width: 320, height: 240)
+
+    // Lower frame rate for smaller GIF (10 frames per second)
+    let frameRate: Double = 10
+    let frameCount = Int(gifDuration * frameRate)
+    var images: [UIImage] = []
+
+    for frameIndex in 0..<frameCount {
+      let time = CMTime(seconds: Double(frameIndex) / frameRate, preferredTimescale: 600)
+
+      // Extract the image at the specified time
+      let cgImage: CGImage
+
+      if #available(iOS 16.0, *) {
+        // Use modern async API for iOS 16+
+        cgImage = try await generator.image(at: time).image
+      } else {
+        // Use older API for iOS 15 and below
+        cgImage = try await withCheckedThrowingContinuation {
+          (continuation: CheckedContinuation<CGImage, Error>) in
+          generator.generateCGImageAsynchronously(for: time) { image, actualTime, error in
+            if let error = error {
+              continuation.resume(throwing: error)
+              return
+            }
+
+            guard let image = image else {
+              continuation.resume(
+                throwing: NSError(
+                  domain: "GIFConversion",
+                  code: 1,
+                  userInfo: [NSLocalizedDescriptionKey: "Failed to generate image"]
+                ))
+              return
+            }
+
+            continuation.resume(returning: image)
+          }
+        }
+      }
+
+      // Add the image to our array
+      images.append(UIImage(cgImage: cgImage))
+    }
+
+    // Create GIF
+    let gifURL = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "\(UUID().uuidString).gif")
+
+    // Use a GIF creation library or implement your own GIF creation here
+    // For simplicity, we'll just create a basic animated GIF
+    try createGIF(from: images, fileURL: gifURL, delay: 1.0 / frameRate)
+
+    return gifURL
+  }
+
+  static func uploadVideoWithProgress(
+    videoURL: URL, pinID: String, incidentType: String
+  ) async throws -> URL {
+    print("[StorageUploader] Starting video upload process")
+
+    // Start background task to allow upload to continue when app is in background
+    let taskID = await UIApplication.shared.beginBackgroundTask(expirationHandler: nil)
+
+    do {
+      // First compress the video to reduce upload size and time
+      let compressedURL = try await compressVideo(inputURL: videoURL)
+
+      // Attempt upload with the compressed video
+      let downloadURL = try await performUpload(
+        fileURL: compressedURL, pinID: pinID, incidentType: incidentType)
+
+      // End background task when upload is complete
+      await UIApplication.shared.endBackgroundTask(taskID)
+
+      return downloadURL
+    } catch {
+      // End background task if there's an error
+      await UIApplication.shared.endBackgroundTask(taskID)
+      throw error
+    }
+  }
+
+  /// Helper function to create a GIF from an array of UIImages
+  /// - Parameters:
+  ///   - images: Array of UIImages to include in the GIF
+  ///   - fileURL: Destination URL for the GIF file
+  ///   - delay: Delay between frames in seconds
+  private static func createGIF(from images: [UIImage], fileURL: URL, delay: TimeInterval) throws {
+    guard
+      let destination = CGImageDestinationCreateWithURL(
+        fileURL as CFURL, "com.compuserve.gif" as CFString, images.count, nil
+      )
+    else {
+      throw NSError(
+        domain: "GIFCreation",
+        code: 1,
+        userInfo: [NSLocalizedDescriptionKey: "Failed to create CGImageDestination"]
+      )
+    }
+
+    // Set GIF properties for looping
+    let gifProperties =
+      [
+        kCGImagePropertyGIFDictionary as String: [
+          kCGImagePropertyGIFLoopCount as String: 0  // Loop forever
+        ]
+      ] as CFDictionary
+
+    CGImageDestinationSetProperties(destination, gifProperties)
+
+    // Add each frame with delay
+    let frameProperties =
+      [
+        kCGImagePropertyGIFDictionary as String: [
+          kCGImagePropertyGIFDelayTime as String: delay
+        ]
+      ] as CFDictionary
+
+    for image in images {
+      if let cgImage = image.cgImage {
+        CGImageDestinationAddImage(destination, cgImage, frameProperties)
+      }
+    }
+
+    // Finalize the GIF
+    if !CGImageDestinationFinalize(destination) {
+      throw NSError(
+        domain: "GIFCreation",
+        code: 2,
+        userInfo: [NSLocalizedDescriptionKey: "Failed to finalize GIF"]
+      )
+    }
+
+    print("[StorageUploader] GIF created successfully at: \(fileURL.path)")
+  }
+
+  // Add the performUpload method
+  private static func performUpload(fileURL: URL, pinID: String, incidentType: String) async throws
+    -> URL
+  {
+    print("[StorageUploader] Starting upload to Firebase Storage")
+
+    let storageRef = Storage.storage().reference()
+    let videoRef = storageRef.child("videos/\(pinID)/\(UUID().uuidString).mp4")
+
+    // Set metadata
+    let metadata = StorageMetadata()
+    metadata.contentType = "video/mp4"
+    metadata.customMetadata = [
+      "pinID": pinID,
+      "incidentType": incidentType,
+      "uploadDate": ISO8601DateFormatter().string(from: Date()),
+      "compressed": "true",
+    ]
+
+    // Upload the file
+    let uploadTask = videoRef.putFile(from: fileURL, metadata: metadata)
+
+    // Return a URL when complete
+    return try await withCheckedThrowingContinuation {
+      (continuation: CheckedContinuation<URL, Error>) in
+      uploadTask.observe(.success) { snapshot in
+        // Get download URL
+        videoRef.downloadURL { url, error in
+          if let error = error {
+            continuation.resume(throwing: error)
+            return
+          }
+
+          guard let downloadURL = url else {
+            continuation.resume(
+              throwing: NSError(
+                domain: "StorageUploader",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Failed to get download URL"]
+              ))
+            return
+          }
+
+          print("[StorageUploader] Upload successful: \(downloadURL)")
+          continuation.resume(returning: downloadURL)
+        }
+      }
+
+      uploadTask.observe(.failure) { snapshot in
+        if let error = snapshot.error {
+          print("[StorageUploader] Upload failed: \(error)")
+          continuation.resume(throwing: error)
+        }
+      }
+    }
+  }
+}

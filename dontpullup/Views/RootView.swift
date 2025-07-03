@@ -7,7 +7,6 @@ struct RootView: View {
 
     var body: some View {
         let isAuthenticated = authState.isAuthenticated
-        let isAnonymous = authState.isAnonymous
 
         Group { // Outer group
             if authState.isLoading {

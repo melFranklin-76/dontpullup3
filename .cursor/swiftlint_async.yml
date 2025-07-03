@@ -1,0 +1,21 @@
+disabled_rules: []
+
+custom_rules:
+  async_must_await:
+    name: "Async calls must use await"
+    regex: "\\b(?!await )([A-Za-z0-9_]+)\\(.*\\)"
+    match_kinds: [call]
+    message: "Prefix async calls with 'await'"
+    severity: error
+
+  no_unreachable_catch:
+    name: "Unreachable 'catch' block"
+    regex: "do \\{[^}]*?\\} catch"
+    message: "Remove unreachable catch; no throwing call inside."
+    severity: warning
+
+  explicit_self:
+    name: "Explicit 'self.' in closures"
+    regex: "(?<!self\\.)\\b(activeUploads|uploadProgress)\\b"
+    message: "Use 'self.' to clarify capture."
+    severity: warning

@@ -1,0 +1,75 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+Cursor.ai Project Context for “Don’t Pull Up”
+
+Project Root: /Users/melfranklin/Desktop/untitled folder/Dontpullup 3
+
+1. Search Scope
+
+Always limit searches and code suggestions to files under the project root folder above.
+
+Do not traverse outside (../) or into nested Xcode project bundles (.xcodeproj).
+
+2. Existing Definitions
+
+Before creating a new view, view model, service, or utility:
+
+Search for relevant keywords in:
+
+Views/
+
+ViewModels/
+
+Services/
+
+Models/
+
+Reuse or extend existing types if their responsibility overlaps.
+
+Avoid duplicates: if a MapView, IncidentTypePicker, or Pin model already exists, update or compose rather than generate a new one.
+
+3. File Organization Reference
+
+App/: App entry points (AppDelegate.swift, DontpullupApp.swift)
+
+Authentication/: Auth logic (AuthenticationManager.swift, AuthState.swift)
+
+Models/: Data structures (Pin.swift, IncidentType.swift, User.swift)
+
+ViewModels/: Business logic and state management
+
+Services/: External integrations (Firebase, Networking, StorageUploader)
+
+Views/: SwiftUI screens and components
+
+Utilities/: Helpers and extensions
+
+cursor/: Cursor.ai config (rules, MCP tools, scripts)
+
+4. Naming & Patterns
+
+Swift files: UpperCamelCase for types, lowerCamelCase for methods/properties
+
+View files: End in View.swift (e.g., SettingsView.swift)
+
+ViewModel files: End in ViewModel.swift
+
+Service files: End in Manager.swift or Uploader.swift
+
+Helper scripts: Place under cursor/ with .py or .sh extensions
+
+5. Generation Guidelines
+
+When asked to scaffold a new feature or file:
+
+Check for existing similar files using the above directory map.
+
+Search for key protocol or function names in root before generating. E.g., if adding a new CameraView, search import AVKit or Video in Views/ first.
+
+If found, propose updating the existing file instead of creating a duplicate.
+
+Save this file under the project root as cursor_context.md and include it in every request to Cursor.ai to provide accurate context and avoid duplication.
+

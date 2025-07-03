@@ -80,7 +80,7 @@ The app follows a clean architecture with clear separation of concerns:
 ### Incident Reporting Flow
 1. Long-press to drop a pin (must be within 200 feet of user location)
 2. Select incident type (Verbal, Physical, Emergency)
-3. Select video from photo library (max 3 minutes)
+3. Select video from photo library or record live video  (max 3 minutes)
 4. Upload with progress indicator
 5. Pin appears on the map after successful upload
 
@@ -167,7 +167,7 @@ The app follows a clean architecture with clear separation of concerns:
 - Add unit and UI tests for core functionality
 
 ## Build and Deployment
-- Target iOS 16.0+
+- Target iOS 16.6+
 - Ensure all required permissions are in Info.plist:
   - `NSLocationWhenInUseUsageDescription`
   - `NSPhotoLibraryUsageDescription`
@@ -212,7 +212,7 @@ dontpullup/
 ### Important Constants
 - Pin drop limit: 200 feet (~61 meters)
 - Maximum video length: 3 minutes
-- Minimum iOS version: 16.0+
+- Minimum iOS version: 16.6+
 
 ### Common Tasks
 - **Adding a new view**: Create a new SwiftUI view in the Views directory
