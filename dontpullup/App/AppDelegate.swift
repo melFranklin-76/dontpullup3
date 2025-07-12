@@ -38,6 +38,19 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             FirebaseApp.configure()
             print("[AppDelegate] Firebase configured in didFinishLaunchingWithOptions")
         }
+        
+        // Initialize performance monitoring
+        _ = PerformanceMonitor.shared
+        print("[AppDelegate] Performance monitoring initialized")
+        
+        // Initialize optimizers
+        _ = FirebaseOptimizer.shared
+        _ = VideoManager.shared
+        print("[AppDelegate] Performance optimizers initialized")
+        
+        // Log app launch completion
+        NotificationCenter.default.post(name: .firstMeaningfulPaint, object: nil)
+        
         return true
     }
     
