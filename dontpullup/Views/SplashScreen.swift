@@ -19,11 +19,17 @@ struct SplashScreen: View {
     var body: some View {
         GeometryReader { geometry in
             ZStack { // Background ZStack
-                // Background Image
-                Image("welcome_background")
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .edgesIgnoringSafeArea(.all)
+                // Background Image with fallback
+                if let bgImage = UIImage(named: "welcome_background") {
+                    Image(uiImage: bgImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .edgesIgnoringSafeArea(.all)
+                } else {
+                    // Fallback to solid color if image not found
+                    Color.black
+                        .edgesIgnoringSafeArea(.all)
+                }
                 
                 // Semi-transparent overlay
                 Color.black.opacity(0.7)

@@ -32,10 +32,16 @@ struct ScrollableViewModifier: ViewModifier {
       ZStack {
         // Background with conditional image
         if useBackgroundImage {
-          Image("welcome_background")
-            .resizable()
-            .aspectRatio(contentMode: .fill)
-            .edgesIgnoringSafeArea(.all)
+          if let bgImage = UIImage(named: "welcome_background") {
+            Image(uiImage: bgImage)
+              .resizable()
+              .aspectRatio(contentMode: .fill)
+              .edgesIgnoringSafeArea(.all)
+          } else {
+            // Fallback to solid color if image not found
+            Color.black
+              .edgesIgnoringSafeArea(.all)
+          }
 
           Color.black.opacity(backgroundOpacity)
             .edgesIgnoringSafeArea(.all)
