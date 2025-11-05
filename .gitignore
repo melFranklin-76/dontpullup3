@@ -63,3 +63,8 @@ fastlane/test_output
 GoogleService-Info.plist
 .DS_Store
 **/.DS_Store
+
+# Build artifacts and archives
+build/
+*.xcarchive
+DerivedData/
