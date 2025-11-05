@@ -19,17 +19,26 @@ struct ProfileView: View {
   @State private var isUpdatingZipCode = false
   @State private var zipCodeError = ""
   @State private var showZipCodeError = false
-  @State private var originalZipCode = ""
+
+  // Computed property for original zip code
+  private var originalZipCode: String {
+    return authManager.currentUserProfile?.originalZipCode ?? ""
+  }
 
   // Premium upgrade state
-  @State private var isPremium = false
   @State private var showPremiumUpgrade = false
   @State private var showPurchaseError = false
   @State private var purchaseErrorMessage = ""
   @State private var showPremiumSuccess = false
 
-  // Access premium manager
+  // Access managers
   @StateObject private var premiumManager = PremiumManager.shared
+  @StateObject private var authManager = AuthenticationManager.shared
+
+  // Computed property for premium status
+  private var isPremium: Bool {
+    return authManager.currentUserProfile?.isPremium ?? false
+  }
 
   var body: some View {
     // Content wrapped in the universal scroll view
@@ -282,45 +291,13 @@ struct ProfileView: View {
       )
     }
     .sheet(isPresented: $showPremiumUpgrade) {
-      PremiumUpgradeView(isPremium: $isPremium, showSuccess: $showPremiumSuccess)
+      PremiumUpgradeView(showSuccess: $showPremiumSuccess)
         .preferredColorScheme(.dark)
     }
     .onAppear {
-      loadUserProfile()
-
-      // Observe premium status updates
-      NotificationCenter.default.addObserver(
-        forName: Notification.Name("UserPremiumStatusUpdated"), object: nil, queue: .main
-      ) { _ in
-        self.isPremium = true
-      }
-    }
-  }
-
-  // Method to load the user profile
-  private func loadUserProfile() {
-    // Check if we have a saved zip code for this user
-    if let user = authState.currentUser {
-      Task {
-        do {
-          let docRef = Firestore.firestore().collection("users").document(user.uid)
-          let document = try await docRef.getDocument()
-
-          if let data = document.data() {
-            let zipCode = data["zipCode"] as? String ?? ""
-            let originalZipFromDB = data["originalZipCode"] as? String ?? zipCode
-            let isPremiumFromDB = data["isPremium"] as? Bool ?? false
-
-            // Update UI on main thread
-            await MainActor.run {
-              self.newZipCode = zipCode
-              self.originalZipCode = originalZipFromDB
-              self.isPremium = isPremiumFromDB
-            }
-          }
-        } catch {
-          print("Error loading user profile: \(error.localizedDescription)")
-        }
+      // Set current zip code from AuthenticationManager
+      if let currentZip = authManager.currentUserProfile?.zipCode {
+        newZipCode = currentZip
       }
     }
   }
@@ -332,12 +309,6 @@ struct ProfileView: View {
 
   // Method to update zip code
   private func updateZipCode() {
-    guard let user = authState.currentUser else {
-      zipCodeError = "You need to be signed in to update your zip code"
-      showZipCodeError = true
-      return
-    }
-
     // Basic validation
     if newZipCode.isEmpty {
       zipCodeError = "Please enter a zip code"
@@ -351,22 +322,13 @@ struct ProfileView: View {
       return
     }
 
-    // Check if user is allowed to update to this zip code
-    if !isPremium && newZipCode != originalZipCode {
-      zipCodeError = "Premium upgrade required to change your zip code"
-      showZipCodeError = true
-      return
-    }
-
     // Show loading state
     isUpdatingZipCode = true
 
-    // Update user profile in Firestore
-    let userRef = Firestore.firestore().collection("users").document(user.uid)
-
+    // Use AuthenticationManager's method which handles premium validation
     Task {
       do {
-        try await userRef.setData(["zipCode": newZipCode], merge: true)
+        try await authManager.updateZipCode(newZipCode)
 
         // Update UI on main thread
         await MainActor.run {
@@ -376,7 +338,7 @@ struct ProfileView: View {
       } catch {
         // Handle error
         await MainActor.run {
-          zipCodeError = "Failed to update: \(error.localizedDescription)"
+          zipCodeError = error.localizedDescription
           showZipCodeError = true
           isUpdatingZipCode = false
         }
@@ -450,10 +412,14 @@ struct ProfileView: View {
 // Premium Upgrade View
 struct PremiumUpgradeView: View {
   @StateObject private var premiumManager = PremiumManager.shared
+  @StateObject private var authManager = AuthenticationManager.shared
   @Environment(\.dismiss) private var dismiss
-  @Binding var isPremium: Bool
   @Binding var showSuccess: Bool
   @State private var showPurchaseError = false
+
+  private var isPremium: Bool {
+    return authManager.currentUserProfile?.isPremium ?? false
+  }
 
   var body: some View {
     NavigationView {
@@ -549,7 +515,6 @@ struct PremiumUpgradeView: View {
       .navigationBarTitle("", displayMode: .inline)
       .onChange(of: premiumManager.purchaseSuccess) { success in
         if success {
-          isPremium = true
           showSuccess = true
           DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             dismiss()

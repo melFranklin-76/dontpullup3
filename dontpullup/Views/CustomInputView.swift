@@ -41,6 +41,7 @@ struct CustomInputViewWrapper<Content: View>: UIViewControllerRepresentable {
     
     func makeUIViewController(context: Context) -> UIHostingController<Content> {
         let hostingController = InputFixHostingController(rootView: content)
+        hostingController.view.translatesAutoresizingMaskIntoConstraints = false
         return hostingController
     }
     
@@ -53,6 +54,7 @@ struct CustomInputViewWrapper<Content: View>: UIViewControllerRepresentable {
 class InputFixHostingController<Content: View>: UIHostingController<Content> {
     override func viewDidLoad() {
         super.viewDidLoad()
+        view.translatesAutoresizingMaskIntoConstraints = false
         
         // Apply the fix when the view loads
         fixInputAssistantHeight()
@@ -74,26 +76,37 @@ class InputFixHostingController<Content: View>: UIHostingController<Content> {
         for window in windowScene.windows {
             window.subviews.forEach { subview in
                 if let assistantView = findInputAssistantView(in: subview) {
-                    // Remove the fixed height constraint
+                    // Remove any height constraints with identifier "assistantHeight" or generic height constraints that might conflict
                     for constraint in assistantView.constraints {
-                        if constraint.identifier == "assistantHeight" {
+                        if constraint.identifier == "assistantHeight"
+                            && constraint.firstAttribute == .height {
                             assistantView.removeConstraint(constraint)
                         }
                     }
+                    // Remove any other height constraints to avoid conflicts (only if they are of height type)
+                    let heightConstraints = assistantView.constraints.filter {
+                        $0.firstAttribute == .height && $0.identifier != "flexibleAssistantHeight"
+                    }
+                    for constraint in heightConstraints {
+                        assistantView.removeConstraint(constraint)
+                    }
                     
-                    // Add a flexible height constraint if needed
-                    let flexibleConstraint = NSLayoutConstraint(
-                        item: assistantView,
-                        attribute: .height,
-                        relatedBy: .greaterThanOrEqual,
-                        toItem: nil,
-                        attribute: .notAnAttribute,
-                        multiplier: 1.0,
-                        constant: 30
-                    )
-                    flexibleConstraint.priority = .defaultHigh
-                    flexibleConstraint.identifier = "flexibleAssistantHeight"
-                    assistantView.addConstraint(flexibleConstraint)
+                    // Add a flexible height constraint if not already added
+                    if !assistantView.constraints.contains(where: { $0.identifier == "flexibleAssistantHeight" }) {
+                        let flexibleConstraint = NSLayoutConstraint(
+                            item: assistantView,
+                            attribute: .height,
+                            relatedBy: .greaterThanOrEqual,
+                            toItem: nil,
+                            attribute: .notAnAttribute,
+                            multiplier: 1.0,
+                            constant: 30
+                        )
+                        flexibleConstraint.priority = .defaultLow
+                        flexibleConstraint.identifier = "flexibleAssistantHeight"
+                        assistantView.translatesAutoresizingMaskIntoConstraints = false
+                        assistantView.addConstraint(flexibleConstraint)
+                    }
                 }
             }
         }
@@ -120,4 +133,4 @@ extension View {
     func fixInputAssistantHeight() -> some View {
         return CustomInputViewWrapper(content: self)
     }
-} 
+}

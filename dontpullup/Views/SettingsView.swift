@@ -1,13 +1,22 @@
 import SwiftUI
+import UserNotifications
 
 struct SettingsView: View {
   @EnvironmentObject private var authState: AuthState
+  @StateObject private var authManager = AuthenticationManager.shared
+  @StateObject private var premiumManager = PremiumManager.shared
   @Environment(\.dismiss) private var dismiss
-  @State private var notificationsEnabled = true
-  @State private var locationTrackingEnabled = true
-  @State private var darkModeEnabled = true
-  @State private var hapticFeedbackEnabled = true
+
+  @AppStorage("notificationsEnabled") private var notificationsEnabled = true
+  @AppStorage("darkModeEnabled") private var darkModeEnabled = true
+  @AppStorage("hapticFeedbackEnabled") private var hapticFeedbackEnabled = true
+
   @State private var showResetConfirmation = false
+  @State private var showZipCodeEditor = false
+  @State private var newZipCode = ""
+  @State private var showPremiumView = false
+
+  @State private var showNotificationsAlert = false
 
   var body: some View {
     NavigationView {
@@ -17,20 +26,38 @@ struct SettingsView: View {
           DPUSectionHeader(title: "GENERAL")
 
           DPUCard {
-            // Add more spacing between toggle items
+            // Enable Notifications toggle with permission request and alert
             Toggle("Enable Notifications", isOn: $notificationsEnabled)
               .toggleStyle(SwitchToggleStyle(tint: .red))
               .padding(.vertical, 10)
+              .onChange(of: notificationsEnabled) { newValue in
+                if newValue {
+                  UNUserNotificationCenter.current().requestAuthorization(
+                    options: [.alert, .badge, .sound]
+                  ) { granted, error in
+                    DispatchQueue.main.async {
+                      if !granted {
+                        notificationsEnabled = false
+                      }
+                    }
+                  }
+                } else {
+                  // Show alert that notifications must be disabled in system settings
+                  showNotificationsAlert = true
+                }
+              }
+              .alert("Disable Notifications", isPresented: $showNotificationsAlert) {
+                Button("OK") {}
+              } message: {
+                Text("To fully disable push notifications, please turn them off in your device's Settings app.")
+              }
 
-            Toggle("Location Tracking", isOn: $locationTrackingEnabled)
-              .toggleStyle(SwitchToggleStyle(tint: .red))
-              .padding(.vertical, 10)
-
+            // Dark Mode toggle that actually applies color scheme
             Toggle("Dark Mode", isOn: $darkModeEnabled)
               .toggleStyle(SwitchToggleStyle(tint: .red))
-              .disabled(true)  // Disabled as app is dark mode only
               .padding(.vertical, 10)
 
+            // Haptic Feedback toggle
             Toggle("Haptic Feedback", isOn: $hapticFeedbackEnabled)
               .toggleStyle(SwitchToggleStyle(tint: .red))
               .padding(.vertical, 10)
@@ -45,6 +72,86 @@ struct SettingsView: View {
                 .foregroundColor(.blue)
             }
             .padding(.vertical, 10)
+          }
+
+          // PREMIUM section
+          if let userProfile = authManager.currentUserProfile {
+            let _ = print(
+              "[SettingsView] Rendering premium section - isPremium: \(userProfile.isPremium)")
+            DPUSectionHeader(title: userProfile.isPremium ? "PREMIUM SETTINGS" : "UPGRADE")
+
+            DPUCard {
+              if userProfile.isPremium {
+                VStack(spacing: 15) {
+                  // Premium status indicator
+                  HStack {
+                    Image(systemName: "star.fill")
+                      .foregroundColor(.yellow)
+                    Text("Premium Active")
+                      .foregroundColor(.white)
+                      .font(.headline)
+                    Spacer()
+                  }
+
+                  Divider().background(Color.gray.opacity(0.3))
+
+                  // Current zip code display
+                  HStack {
+                    VStack(alignment: .leading) {
+                      Text("Current Zip Code")
+                        .foregroundColor(.gray)
+                        .font(.caption)
+                      Text(userProfile.zipCode)
+                        .foregroundColor(.white)
+                        .font(.title2)
+                    }
+                    Spacer()
+                    Button(action: {
+                      print(
+                        "[SettingsView] Change button tapped - isPremium: \(userProfile.isPremium)")
+                      print("[SettingsView] Current zip: \(userProfile.zipCode)")
+                      newZipCode = userProfile.zipCode
+                      showZipCodeEditor = true
+                    }) {
+                      Text("Change")
+                        .foregroundColor(userProfile.isPremium ? .blue : .gray)
+                    }
+                    .disabled(!userProfile.isPremium)
+                  }
+
+                  // Premium benefits reminder
+                  Text(
+                    "✓ View incidents from all zip codes\n✓ Change location anytime\n✓ Enhanced notifications"
+                  )
+                  .foregroundColor(.gray)
+                  .font(.caption)
+                  .multilineTextAlignment(.leading)
+                }
+                .padding(.vertical, 10)
+              } else {
+                VStack(spacing: 15) {
+                  HStack {
+                    VStack(alignment: .leading) {
+                      Text("Free Plan")
+                        .foregroundColor(.white)
+                        .font(.headline)
+                      Text("Limited to \(userProfile.originalZipCode)")
+                        .foregroundColor(.gray)
+                        .font(.caption)
+                    }
+                    Spacer()
+                    Button(action: {
+                      showPremiumView = true
+                    }) {
+                      Text("Upgrade")
+                        .foregroundColor(.yellow)
+                        .fontWeight(.semibold)
+                    }
+                  }
+                }
+                .padding(.vertical, 10)
+              }
+            }
           }
 
           // APP INFO section
@@ -136,14 +243,41 @@ struct SettingsView: View {
       } message: {
         Text("Are you sure you want to reset all settings to their default values?")
       }
+      .sheet(isPresented: $showZipCodeEditor) {
+        ZipCodeEditorView(
+          currentZipCode: authManager.currentUserProfile?.zipCode ?? "",
+          onSave: { newZip in
+            Task {
+              do {
+                try await authManager.updateZipCode(newZip)
+                showZipCodeEditor = false
+              } catch {
+                // Handle error (show alert)
+                print("Failed to update zip code: \(error.localizedDescription)")
+              }
+            }
+          },
+          onCancel: {
+            showZipCodeEditor = false
+          }
+        )
+      }
+      .sheet(isPresented: $showPremiumView) {
+        PremiumView()
+      }
     }
     .navigationViewStyle(.stack)
+    .preferredColorScheme(darkModeEnabled ? .dark : .light)
+    .onAppear {
+      print(
+        "[SettingsView] onAppear – isPremium = \(authManager.currentUserProfile?.isPremium ?? false)"
+      )
+    }
   }
 
   private func resetSettings() {
     // Reset UI state
     notificationsEnabled = true
-    locationTrackingEnabled = true
     darkModeEnabled = true
     hapticFeedbackEnabled = true
 
@@ -162,9 +296,11 @@ struct SettingsView: View {
     // Sign out the user - this will trigger navigation back to the auth screen
     authState.signOut()
 
-    // Show confirmation feedback
-    let banner = UINotificationFeedbackGenerator()
-    banner.notificationOccurred(.success)
+    // Show confirmation feedback only if haptics enabled
+    if hapticFeedbackEnabled {
+      let banner = UINotificationFeedbackGenerator()
+      banner.notificationOccurred(.success)
+    }
 
     // Dismiss this view after a short delay to allow the haptic feedback to complete
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -245,7 +381,7 @@ struct PrivacyPolicyView: View {
           .fontWeight(.bold)
           .foregroundColor(.white)
 
-        Text("Last updated: June 2023")
+        Text("Last updated: January 2025")
           .font(.caption)
           .foregroundColor(.gray)
 
@@ -362,7 +498,7 @@ struct TermsOfServiceView: View {
           .fontWeight(.bold)
           .foregroundColor(.white)
 
-        Text("Last updated: June 2023")
+        Text("Last updated: January 2025")
           .font(.caption)
           .foregroundColor(.gray)
 

@@ -87,34 +87,96 @@ class TutorialViewController: UIViewController {
         view.addSubview(pageIndicatorLabel)
         
         // Layout constraints
+        let emojiCenterX = emojiLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor)
+        emojiCenterX.identifier = "emojiCenterX"
+        emojiCenterX.priority = .defaultHigh
+        
+        let emojiTop = emojiLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 80)
+        emojiTop.identifier = "emojiTop"
+        emojiTop.priority = .defaultHigh
+        
+        let contentCenterX = contentView.centerXAnchor.constraint(equalTo: view.centerXAnchor)
+        contentCenterX.identifier = "contentViewCenterX"
+        contentCenterX.priority = .defaultHigh
+        
+        let contentWidth = contentView.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, multiplier: 0.95)
+        contentWidth.identifier = "contentViewWidth"
+        contentWidth.priority = .defaultHigh
+        
+        let titleTop = titleLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 20)
+        titleTop.identifier = "titleTop"
+        titleTop.priority = .defaultHigh
+        
+        let titleLeading = titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20)
+        titleLeading.identifier = "titleLeading"
+        titleLeading.priority = .defaultHigh
+        
+        let titleTrailing = titleLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20)
+        titleTrailing.identifier = "titleTrailing"
+        titleTrailing.priority = .defaultHigh
+        
+        let messageTop = messageLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 16)
+        messageTop.identifier = "messageTop"
+        messageTop.priority = .defaultHigh
+        
+        let messageLeading = messageLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20)
+        messageLeading.identifier = "messageLeading"
+        messageLeading.priority = .defaultHigh
+        
+        let messageTrailing = messageLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20)
+        messageTrailing.identifier = "messageTrailing"
+        messageTrailing.priority = .defaultHigh
+        
+        let messageBottom = messageLabel.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -20)
+        messageBottom.identifier = "messageBottom"
+        messageBottom.priority = .defaultHigh
+        
+        let pageIndicatorCenterX = pageIndicatorLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor)
+        pageIndicatorCenterX.identifier = "pageIndicatorCenterX"
+        pageIndicatorCenterX.priority = .defaultHigh
+        
+        let pageIndicatorBottom = pageIndicatorLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -40)
+        pageIndicatorBottom.identifier = "pageIndicatorBottom"
+        pageIndicatorBottom.priority = .defaultHigh
+        
+        let pageIndicatorHeight = pageIndicatorLabel.heightAnchor.constraint(equalToConstant: 36)
+        pageIndicatorHeight.identifier = "pageIndicatorHeight"
+        pageIndicatorHeight.priority = .defaultHigh
+        
         NSLayoutConstraint.activate([
-            // Emoji at top
-            emojiLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            emojiLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 80),
-            
-            // Content view in center
-            contentView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            contentView.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-            contentView.widthAnchor.constraint(equalTo: view.widthAnchor, multiplier: 0.85),
-            contentView.heightAnchor.constraint(greaterThanOrEqualToConstant: 150),
-            
-            // Title inside content
-            titleLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 20),
-            titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
-            titleLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
-            
-            // Message below title
-            messageLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 16),
-            messageLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
-            messageLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
-            messageLabel.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -20),
-            
-            // Page indicator at bottom
-            pageIndicatorLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            pageIndicatorLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -40),
-            pageIndicatorLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 150),
-            pageIndicatorLabel.heightAnchor.constraint(equalToConstant: 36)
+            emojiCenterX,
+            emojiTop,
+            contentCenterX,
+            contentWidth,
+            titleTop,
+            titleLeading,
+            titleTrailing,
+            messageTop,
+            messageLeading,
+            messageTrailing,
+            messageBottom,
+            pageIndicatorCenterX,
+            pageIndicatorBottom,
+            pageIndicatorHeight
         ])
+        
+        // Add height constraint for contentView with low priority
+        let minHeight = contentView.heightAnchor.constraint(greaterThanOrEqualToConstant: 150)
+        minHeight.priority = .defaultLow
+        minHeight.identifier = "contentViewMinHeight"
+        minHeight.isActive = true
+        
+        // Center Y constraint for contentView
+        let centerY = contentView.centerYAnchor.constraint(equalTo: view.centerYAnchor)
+        centerY.identifier = "contentViewCenterY"
+        centerY.priority = .defaultHigh
+        centerY.isActive = true
+        
+        // Add low priority width constraint for pageIndicatorLabel
+        let pageIndicatorMinWidth = pageIndicatorLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 150)
+        pageIndicatorMinWidth.priority = .defaultLow
+        pageIndicatorMinWidth.identifier = "pageIndicatorMinWidth"
+        pageIndicatorMinWidth.isActive = true
     }
     
     // MARK: - Content Updates
@@ -232,4 +294,4 @@ struct TutorialData {
             emoji: "��"
         )
     ]
-} 
+}

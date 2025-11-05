@@ -3,6 +3,89 @@ import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
+// Global function to show error banners from anywhere in this file
+func showGlobalErrorBanner(_ message: String) {
+  print("[IncidentTypePicker] SHOWING GLOBAL ERROR BANNER: \(message)")
+  guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+    let window = windowScene.windows.first
+  else {
+    print("[IncidentTypePicker] ERROR: Could not find window scene for banner")
+    return
+  }
+
+  let bannerView = UIView()
+  bannerView.backgroundColor = UIColor.systemRed
+  bannerView.layer.cornerRadius = 10
+  bannerView.translatesAutoresizingMaskIntoConstraints = false
+
+  let label = UILabel()
+  label.text = message
+  label.textColor = .white
+  label.font = UIFont.systemFont(ofSize: 16, weight: .medium)
+  label.numberOfLines = 0
+  label.textAlignment = .center
+  label.translatesAutoresizingMaskIntoConstraints = false
+
+  bannerView.addSubview(label)
+  window.addSubview(bannerView)
+
+  let bannerViewLeading = bannerView.leadingAnchor.constraint(greaterThanOrEqualTo: window.leadingAnchor, constant: 20)
+  bannerViewLeading.priority = .defaultHigh
+  bannerViewLeading.identifier = "bannerViewLeading"
+
+  let bannerViewTrailing = bannerView.trailingAnchor.constraint(lessThanOrEqualTo: window.trailingAnchor, constant: -20)
+  bannerViewTrailing.priority = .defaultHigh
+  bannerViewTrailing.identifier = "bannerViewTrailing"
+
+  let bannerViewHeight = bannerView.heightAnchor.constraint(greaterThanOrEqualToConstant: 60)
+  bannerViewHeight.priority = .defaultLow
+  bannerViewHeight.identifier = "bannerViewHeight"
+
+  let labelLeading = label.leadingAnchor.constraint(equalTo: bannerView.leadingAnchor, constant: 16)
+  labelLeading.priority = .defaultHigh
+  labelLeading.identifier = "labelLeading"
+
+  let labelTrailing = label.trailingAnchor.constraint(equalTo: bannerView.trailingAnchor, constant: -16)
+  labelTrailing.priority = .defaultHigh
+  labelTrailing.identifier = "labelTrailing"
+
+  NSLayoutConstraint.activate([
+    bannerViewLeading,
+    bannerViewTrailing,
+    bannerView.centerXAnchor.constraint(equalTo: window.centerXAnchor),
+    bannerView.topAnchor.constraint(equalTo: window.safeAreaLayoutGuide.topAnchor, constant: 20),
+    bannerViewHeight,
+
+    labelLeading,
+    labelTrailing,
+    label.centerYAnchor.constraint(equalTo: bannerView.centerYAnchor),
+  ])
+
+  // Animate in
+  bannerView.alpha = 0
+  bannerView.transform = CGAffineTransform(translationX: 0, y: -100)
+
+  UIView.animate(
+    withDuration: 0.5, delay: 0, usingSpringWithDamping: 0.7, initialSpringVelocity: 0, options: []
+  ) {
+    bannerView.alpha = 1
+    bannerView.transform = .identity
+  }
+
+  // Auto-dismiss after 4 seconds
+  DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+    UIView.animate(
+      withDuration: 0.3,
+      animations: {
+        bannerView.alpha = 0
+        bannerView.transform = CGAffineTransform(translationX: 0, y: -100)
+      }
+    ) { _ in
+      bannerView.removeFromSuperview()
+    }
+  }
+}
+
 struct IncidentTypePicker: View {
   @ObservedObject var viewModel: MapViewModel
   @Environment(\.presentationMode) var presentationMode
@@ -87,8 +170,11 @@ struct IncidentTypePicker: View {
           },
           .default(Text("Record Video (3 min max)")) {
             if let type = selectedType {
+              // Capture current presentationMode.wrappedValue to avoid capturing Binding in closure and Sendable warnings
+              let presentationModeValue = presentationMode.wrappedValue
               presentVideoRecorder(
-                for: type, viewModel: viewModel, presentationMode: presentationMode)
+                for: type, viewModel: viewModel, presentationMode: Binding(get: { presentationModeValue }, set: { _ in }))
+              presentationMode.wrappedValue.dismiss()
             }
           },
           .cancel(),
@@ -98,8 +184,11 @@ struct IncidentTypePicker: View {
     .onChange(of: shouldPresentPicker) { newValue in
       if newValue, let type = selectedType {
         // Present immediately without delay to avoid view hierarchy issues
+        // Capture current presentationMode.wrappedValue to avoid capturing Binding in async closure
+        let presentationModeValue = presentationMode.wrappedValue
         presentVideoPickerDirectly(
-          for: type, viewModel: viewModel, presentationMode: presentationMode)
+          for: type, viewModel: viewModel, presentationMode: Binding(get: { presentationModeValue }, set: { _ in }))
+        presentationMode.wrappedValue.dismiss()
         shouldPresentPicker = false
       }
     }
@@ -112,9 +201,10 @@ func presentVideoPickerDirectly(
   for incidentType: IncidentType, viewModel: MapViewModel,
   presentationMode: Binding<PresentationMode>
 ) {
-  // First check photo library permission
-  PHPhotoLibrary.requestAuthorization(for: .readWrite) { status in
-    DispatchQueue.main.async {
+  let presentationModeValue = presentationMode.wrappedValue
+  PHPhotoLibrary.requestAuthorization(for: .readWrite) { [viewModel, incidentType] status in
+    Task { @MainActor in
+      let dismissalBinding = Binding(get: { presentationModeValue }, set: { _ in })
       switch status {
       case .authorized, .limited:
         // Configure and present picker
@@ -126,7 +216,7 @@ func presentVideoPickerDirectly(
 
         // Create the delegate adapter
         let delegateAdapter = VideoDelegateAdapter(
-          incidentType: incidentType, viewModel: viewModel, presentationMode: presentationMode)
+          incidentType: incidentType, viewModel: viewModel, presentationMode: dismissalBinding)
         VideoDelegateAdapter.activeDelegates.append(delegateAdapter)
         picker.delegate = delegateAdapter
 
@@ -135,36 +225,26 @@ func presentVideoPickerDirectly(
           let window = windowScene.windows.first,
           let rootVC = window.rootViewController
         {
-
-          // Find the topmost presented controller
           var topController = rootVC
           while let presented = topController.presentedViewController {
             topController = presented
           }
-
-          // Present immediately without delay and dismiss IncidentTypePicker after
           topController.present(picker, animated: true) {
-            // Don't dismiss IncidentTypePicker here - wait for photo picker to finish
             print("[IncidentTypePicker] Photo picker presented successfully")
           }
         } else {
-          viewModel.showError("Could not present photo picker")
+          showGlobalErrorBanner("Could not present photo picker")
         }
-
       case .denied, .restricted:
-        viewModel.showError(
+        showGlobalErrorBanner(
           "Please allow access to your photo library in Settings to upload videos")
-        // Optionally open settings
         if let settingsURL = URL(string: UIApplication.openSettingsURLString) {
           UIApplication.shared.open(settingsURL)
         }
-
       case .notDetermined:
-        // This shouldn't happen since we just requested authorization
-        viewModel.showError("Photo library access not determined")
-
+        showGlobalErrorBanner("Photo library access not determined")
       @unknown default:
-        viewModel.showError("Unknown photo library access status")
+        showGlobalErrorBanner("Unknown photo library access status")
       }
     }
   }
@@ -176,14 +256,15 @@ func presentVideoRecorder(
   for incidentType: IncidentType, viewModel: MapViewModel,
   presentationMode: Binding<PresentationMode>
 ) {
-  // Check camera permission first
+  // Capture the raw presentationMode.wrappedValue to avoid capturing Binding in closure (Sendable warning)
+  let presentationModeValue = presentationMode.wrappedValue
   AVCaptureDevice.requestAccess(for: .video) { granted in
     DispatchQueue.main.async {
       if granted {
         // Create and configure the image picker for video recording
         let imagePicker = UIImagePickerController()
         imagePicker.sourceType = .camera
-        imagePicker.mediaTypes = ["public.movie"]
+        imagePicker.mediaTypes = [UTType.movie.identifier]
         imagePicker.cameraCaptureMode = .video
         imagePicker.videoMaximumDuration = 180  // 3 minutes
         imagePicker.videoQuality = .typeHigh
@@ -191,7 +272,7 @@ func presentVideoRecorder(
 
         // Create the delegate adapter
         let delegateAdapter = VideoRecorderDelegateAdapter(
-          incidentType: incidentType, viewModel: viewModel, presentationMode: presentationMode)
+          incidentType: incidentType, viewModel: viewModel, presentationMode: Binding(get: { presentationModeValue }, set: { _ in }))
         VideoRecorderDelegateAdapter.activeDelegates.append(delegateAdapter)
         imagePicker.delegate = delegateAdapter
 
@@ -212,10 +293,10 @@ func presentVideoRecorder(
             print("[IncidentTypePicker] Video recorder presented successfully")
           }
         } else {
-          viewModel.showError("Could not present video recorder")
+          showGlobalErrorBanner("Could not present video recorder")
         }
       } else {
-        viewModel.showError("Please allow access to your camera in Settings to record videos")
+        showGlobalErrorBanner("Please allow access to your camera in Settings to record videos")
         // Optionally open settings
         if let settingsURL = URL(string: UIApplication.openSettingsURLString) {
           UIApplication.shared.open(settingsURL)
@@ -274,7 +355,7 @@ class VideoProcessor {
         try await viewModel.dropPinWithVideo(for: incidentType, videoURL: tempURL)
       }
     } catch {
-      viewModel.showError("Failed to process video: \(error.localizedDescription)")
+      showGlobalErrorBanner("Failed to process video: \(error.localizedDescription)")
       viewModel.clearPendingData()
     }
   }
@@ -299,128 +380,226 @@ class VideoDelegateAdapter: NSObject, PHPickerViewControllerDelegate {
 
   func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
     print("[VideoDelegateAdapter] Photo picker finished with \(results.count) results")
+    print("[VideoDelegateAdapter] USING NEW CODE PATH - Photo picker delegate")
+
+    // Store the result for processing after dismissal
+    let selectedResult = results.first
 
     // Immediately dismiss the picker and IncidentTypePicker to reduce UI blocking
     picker.dismiss(animated: true) {
       DispatchQueue.main.async {
-        self.presentationMode.wrappedValue.dismiss()
+        // Access presentationMode.wrappedValue dismissal on main actor to avoid Sendable warnings
+        Task { @MainActor in
+          self.presentationMode.wrappedValue.dismiss()
+        }
+
+        // Wait for UI to settle before processing
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+          if let result = selectedResult {
+            print("[VideoDelegateAdapter] User selected a video, starting processing...")
+
+            // Show immediate visual feedback
+            self.viewModel.uploadProgress = 0.05
+
+            // Process video with proper error handling
+            Task {
+              await self.processVideoSafely(result)
+            }
+          } else {
+            print("[VideoDelegateAdapter] User canceled video selection")
+            self.viewModel.clearPendingData()
+          }
+        }
       }
     }
 
     // Remove this delegate from the static array to avoid memory leaks
     Self.activeDelegates.removeAll { $0 === self }
+  }
 
-    guard let result = results.first else {
-      print("[VideoDelegateAdapter] User canceled video selection")
-      DispatchQueue.main.async {
+  // New method that handles errors without showing alerts
+  private func processVideoSafely(_ result: PHPickerResult) async {
+    print("[VideoDelegateAdapter] ENTERING processVideoSafely - NEW METHOD")
+    // Show processing feedback
+    await MainActor.run {
+      self.viewModel.uploadProgress = 0.1
+      print("[VideoDelegateAdapter] Set upload progress to 0.1")
+    }
+
+    // Check video metadata before proceeding
+    guard let assetId = result.assetIdentifier,
+      let asset = PHAsset.fetchAssets(withLocalIdentifiers: [assetId], options: nil).firstObject,
+      let coord = await MainActor.run(body: { self.viewModel.pendingCoordinate })
+    else {
+      print("[VideoDelegateAdapter] Could not load video metadata")
+      await MainActor.run {
+        self.viewModel.uploadProgress = 0
         self.viewModel.clearPendingData()
+        // Show error as a banner instead of alert
+        self.showErrorBanner("Could not load video metadata")
       }
       return
     }
 
-    print("[VideoDelegateAdapter] User selected a video, starting processing...")
+    let pinLocation = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
+    let isValid = await self.viewModel.checkVideoMetadata(asset: asset, pinLocation: pinLocation)
 
-    // Check video metadata before proceeding
-    Task { @MainActor in
-      guard let assetId = result.assetIdentifier,
-        let asset = PHAsset.fetchAssets(withLocalIdentifiers: [assetId], options: nil).firstObject,
-        let coord = self.viewModel.pendingCoordinate
-      else {
-        self.viewModel.showError("Could not load video metadata.")
-        return
+    guard isValid else {
+      print("[VideoDelegateAdapter] Video metadata validation failed")
+      await MainActor.run {
+        self.viewModel.uploadProgress = 0
+        self.viewModel.clearPendingData()
+        // Show error as a banner instead of alert
+        self.showErrorBanner("Video must be ≤5 hours old and ≤200 ft from the pin location")
       }
+      return
+    }
 
-      let pinLocation = CLLocation(
-        latitude: coord.latitude,
-        longitude: coord.longitude
-      )
-
-      let isValid = await self.viewModel.checkVideoMetadata(
-        asset: asset,
-        pinLocation: pinLocation
-      )
-
-      guard isValid else {
-        self.viewModel.showError(
-          "Video must be ≤5 hours old and ≤200 ft from the pin location."
-        )
-        return
+    // Process video in background
+    do {
+      try await self.processVideoInBackground(result)
+    } catch {
+      print("[VideoDelegateAdapter] Video processing failed: \(error)")
+      await MainActor.run {
+        self.viewModel.uploadProgress = 0
+        self.viewModel.clearPendingData()
+        self.showErrorBanner("Failed to process video: \(error.localizedDescription)")
       }
-
-      // Process video in background to avoid main thread blocking
-      await self.processVideoInBackground(result)
     }
   }
 
-  private func processVideoInBackground(_ result: PHPickerResult) async {
-    do {
-      // Show immediate feedback to user - run on main thread
-      await MainActor.run {
-        self.viewModel.uploadProgress = 0.1  // Show we're starting
-      }
+  // Show error as a temporary banner instead of alert
+  private func showErrorBanner(_ message: String) {
+    print("[VideoDelegateAdapter] SHOWING ERROR BANNER: \(message)")
+    guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+      let window = windowScene.windows.first
+    else {
+      print("[VideoDelegateAdapter] ERROR: Could not find window scene for banner")
+      return
+    }
 
-      // Create temporary URL for video processing
-      let tempURL = FileManager.default.temporaryDirectory
-        .appendingPathComponent(UUID().uuidString)
-        .appendingPathExtension("mp4")
+    let bannerView = UIView()
+    bannerView.backgroundColor = UIColor.systemRed
+    bannerView.layer.cornerRadius = 10
+    bannerView.translatesAutoresizingMaskIntoConstraints = false
 
-      // Load video file WITHOUT timeout wrapper to avoid deadlock
-      try await withCheckedThrowingContinuation {
-        (continuation: CheckedContinuation<Void, Error>) in
-        result.itemProvider.loadFileRepresentation(forTypeIdentifier: UTType.movie.identifier) {
-          url, error in
-          if let error = error {
-            continuation.resume(throwing: error)
-            return
-          }
+    let label = UILabel()
+    label.text = message
+    label.textColor = .white
+    label.font = UIFont.systemFont(ofSize: 16, weight: .medium)
+    label.numberOfLines = 0
+    label.textAlignment = .center
+    label.translatesAutoresizingMaskIntoConstraints = false
 
-          guard let sourceURL = url else {
-            continuation.resume(
-              throwing: NSError(
-                domain: "VideoDelegateAdapter", code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "No video file was provided"]))
-            return
-          }
+    bannerView.addSubview(label)
+    window.addSubview(bannerView)
 
-          do {
-            // Quick copy without processing
-            try FileManager.default.copyItem(at: sourceURL, to: tempURL)
-            continuation.resume()
-          } catch {
-            continuation.resume(throwing: error)
-          }
+    let bannerViewLeading = bannerView.leadingAnchor.constraint(greaterThanOrEqualTo: window.leadingAnchor, constant: 20)
+    bannerViewLeading.priority = .defaultHigh
+    bannerViewLeading.identifier = "bannerViewLeading"
+
+    let bannerViewTrailing = bannerView.trailingAnchor.constraint(lessThanOrEqualTo: window.trailingAnchor, constant: -20)
+    bannerViewTrailing.priority = .defaultHigh
+    bannerViewTrailing.identifier = "bannerViewTrailing"
+
+    let bannerViewHeight = bannerView.heightAnchor.constraint(greaterThanOrEqualToConstant: 60)
+    bannerViewHeight.priority = .defaultLow
+    bannerViewHeight.identifier = "bannerViewHeight"
+
+    let labelLeading = label.leadingAnchor.constraint(equalTo: bannerView.leadingAnchor, constant: 16)
+    labelLeading.priority = .defaultHigh
+    labelLeading.identifier = "labelLeading"
+
+    let labelTrailing = label.trailingAnchor.constraint(equalTo: bannerView.trailingAnchor, constant: -16)
+    labelTrailing.priority = .defaultHigh
+    labelTrailing.identifier = "labelTrailing"
+
+    NSLayoutConstraint.activate([
+      bannerViewLeading,
+      bannerViewTrailing,
+      bannerView.centerXAnchor.constraint(equalTo: window.centerXAnchor),
+      bannerView.topAnchor.constraint(equalTo: window.safeAreaLayoutGuide.topAnchor, constant: 20),
+      bannerViewHeight,
+
+      labelLeading,
+      labelTrailing,
+      label.centerYAnchor.constraint(equalTo: bannerView.centerYAnchor),
+    ])
+
+    // Animate in
+    bannerView.alpha = 0
+    bannerView.transform = CGAffineTransform(translationX: 0, y: -100)
+
+    UIView.animate(
+      withDuration: 0.5, delay: 0, usingSpringWithDamping: 0.7, initialSpringVelocity: 0,
+      options: []
+    ) {
+      bannerView.alpha = 1
+      bannerView.transform = .identity
+    }
+
+    // Auto-dismiss after 4 seconds
+    DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+      UIView.animate(
+        withDuration: 0.3,
+        animations: {
+          bannerView.alpha = 0
+          bannerView.transform = CGAffineTransform(translationX: 0, y: -100)
         }
-      }
-
-      // Update progress and start upload immediately - run on main thread
-      await MainActor.run {
-        self.viewModel.uploadProgress = 0.2
-      }
-
-      print("[VideoDelegateAdapter] Video loaded successfully, starting upload...")
-
-      // Start upload directly without additional processing
-      try await self.viewModel.dropPinWithVideo(for: self.incidentType, videoURL: tempURL)
-
-    } catch {
-      print("[VideoDelegateAdapter] Error processing video: \(error.localizedDescription)")
-      await MainActor.run {
-        // Provide user-friendly error messages
-        let userMessage: String
-        if error.localizedDescription.contains("copyItem") {
-          userMessage =
-            "Unable to access the selected video. Please try selecting a different video."
-        } else if error.localizedDescription.contains("No video file") {
-          userMessage =
-            "The selected file is not a valid video. Please choose a video from your library."
-        } else {
-          userMessage = "Unable to process video. Please try again or select a different video."
-        }
-
-        self.viewModel.showError(userMessage)
-        self.viewModel.clearPendingData()
+      ) { _ in
+        bannerView.removeFromSuperview()
       }
     }
+  }
+
+  private func processVideoInBackground(_ result: PHPickerResult) async throws {
+    // Show immediate feedback to user - run on main thread
+    await MainActor.run {
+      self.viewModel.uploadProgress = 0.2  // Show we're starting
+    }
+
+    // Create temporary URL for video processing
+    let tempURL = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString)
+      .appendingPathExtension("mp4")
+
+    // Load video file WITHOUT timeout wrapper to avoid deadlock
+    try await withCheckedThrowingContinuation {
+      (continuation: CheckedContinuation<Void, Error>) in
+      result.itemProvider.loadFileRepresentation(forTypeIdentifier: UTType.movie.identifier) {
+        url, error in
+        if let error = error {
+          continuation.resume(throwing: error)
+          return
+        }
+
+        guard let sourceURL = url else {
+          continuation.resume(
+            throwing: NSError(
+              domain: "VideoDelegateAdapter", code: -1,
+              userInfo: [NSLocalizedDescriptionKey: "No video file was provided"]))
+          return
+        }
+
+        do {
+          // Quick copy without processing
+          try FileManager.default.copyItem(at: sourceURL, to: tempURL)
+          continuation.resume()
+        } catch {
+          continuation.resume(throwing: error)
+        }
+      }
+    }
+
+    // Update progress and start upload immediately - run on main thread
+    await MainActor.run {
+      self.viewModel.uploadProgress = 0.3
+    }
+
+    print("[VideoDelegateAdapter] Video loaded successfully, starting upload...")
+
+    // Start upload directly without additional processing
+    try await self.viewModel.dropPinWithVideo(for: self.incidentType, videoURL: tempURL)
   }
 }
 
@@ -453,18 +632,21 @@ class VideoRecorderDelegateAdapter: NSObject, UIImagePickerControllerDelegate,
     // Dismiss the recorder and the incident type picker
     picker.dismiss(animated: true) {
       DispatchQueue.main.async {
-        self.presentationMode.wrappedValue.dismiss()
+        // Access presentationMode.wrappedValue dismissal on main actor to avoid Sendable warnings
+        Task { @MainActor in
+          self.presentationMode.wrappedValue.dismiss()
+        }
       }
     }
 
-    // Remove this delegate from the static array to avoid memory leaks
+    // Remove this delegate from the static array to avoid memory leaks (added here to cover dismissal path)
     Self.activeDelegates.removeAll { $0 === self }
 
     // Get the video URL from the info dictionary
     guard let videoURL = info[.mediaURL] as? URL else {
       print("[VideoRecorderDelegateAdapter] No video URL found")
       DispatchQueue.main.async {
-        self.viewModel.showError("Failed to retrieve recorded video")
+        showGlobalErrorBanner("Failed to retrieve recorded video")
         self.viewModel.clearPendingData()
       }
       return
@@ -547,7 +729,7 @@ class VideoRecorderDelegateAdapter: NSObject, UIImagePickerControllerDelegate,
     } catch {
       print("[VideoRecorderDelegateAdapter] Error processing video: \(error.localizedDescription)")
       await MainActor.run {
-        self.viewModel.showError("Failed to process recorded video: \(error.localizedDescription)")
+        showGlobalErrorBanner("Failed to process recorded video: \(error.localizedDescription)")
         self.viewModel.clearPendingData()
       }
     }
@@ -559,3 +741,6 @@ class VideoRecorderDelegateAdapter: NSObject, UIImagePickerControllerDelegate,
 // MARK: - ItemProvider Compatibility helper (bridges older callback API)
 
 // Removed loadMovie function - no longer needed with improved video handling
+
+
+

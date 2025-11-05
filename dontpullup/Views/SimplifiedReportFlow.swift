@@ -4,6 +4,18 @@ import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// Always present modals from the topmost view controller to avoid UIKit constraint issues.
+func topMostViewController() -> UIViewController? {
+  guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene else {
+    return nil
+  }
+  var topController = windowScene.windows.first { $0.isKeyWindow }?.rootViewController
+  while let presented = topController?.presentedViewController {
+    topController = presented
+  }
+  return topController
+}
+
 /// Minimalist incident type picker that appears after long press
 struct IncidentPickerView: View {
   @Environment(\.dismiss) private var dismiss
@@ -90,16 +102,14 @@ extension MapView {
 
   // Shows the incident picker sheet
   private func showIncidentPicker() {
-    guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-      let rootVC = windowScene.windows.first?.rootViewController
-    else {
+    guard let topVC = topMostViewController() else {
       return
     }
 
     let incidentPicker = UIHostingController(rootView: IncidentPickerView(viewModel: viewModel))
     incidentPicker.modalPresentationStyle = .formSheet
 
-    rootVC.present(incidentPicker, animated: true)
+    topVC.present(incidentPicker, animated: true)
 
     // Set up observation for when the incident type gets selected
     NotificationCenter.default.addObserver(
@@ -132,13 +142,11 @@ extension MapView {
       return
     }
 
-    guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-      let rootVC = windowScene.windows.first?.rootViewController
-    else {
+    guard let topVC = topMostViewController() else {
       return
     }
 
-    rootVC.present(picker, animated: true)
+    topVC.present(picker, animated: true)
   }
 }
 

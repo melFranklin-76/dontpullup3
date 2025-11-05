@@ -40,6 +40,11 @@ struct MainTabView: View {
       .sheet(item: $mapViewModel.reportStep) { _ in
         ReportFlowView(viewModel: mapViewModel)
       }
+      .sheet(isPresented: $mapViewModel.showingContentGuidelines) {
+        ContentGuidelinesView(isPresented: $mapViewModel.showingContentGuidelines) {
+          mapViewModel.acceptContentGuidelines()
+        }
+      }
       .onAppear {
         // Check if we should show the tutorial (for anonymous users or first-time users)
         checkTutorialState()
@@ -96,18 +101,10 @@ struct MainTabView: View {
 
   /// Presents the tutorial using UIKit for guaranteed visibility
   private func presentTutorial() {
-    // Find the current active window scene
-    guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-      let rootVC = windowScene.windows.first?.rootViewController
-    else {
-      print("Tutorial Error: Could not find root view controller")
+    // Find the topmost view controller to avoid constraint issues and always present from the correct context
+    guard let topController = topMostViewController() else {
+      print("Tutorial Error: Could not find top view controller")
       return
-    }
-
-    // Find the topmost presented controller
-    var topController = rootVC
-    while let presentedVC = topController.presentedViewController {
-      topController = presentedVC
     }
 
     // Create and present the tutorial
