@@ -345,11 +345,12 @@ class Coordinator: NSObject, MKMapViewDelegate {
   
   func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
     // Defer state updates to avoid "Publishing changes from within view updates" warning
-    // This delegate is called during MapKit's rendering cycle, so we need to defer
-    // any Published property changes to the next run loop iteration
-    Task { @MainActor in
-      parent.viewModel.region = mapView.region
-      parent.viewModel.refreshPinsForCurrentRegion()
+    // This delegate is called during MapKit's rendering cycle, so we need to explicitly
+    // defer any Published property changes to the next run loop iteration
+    let newRegion = mapView.region
+    DispatchQueue.main.async { [weak parent] in
+      parent?.viewModel.region = newRegion
+      parent?.viewModel.refreshPinsForCurrentRegion()
     }
   }
 
