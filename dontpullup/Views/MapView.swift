@@ -685,7 +685,7 @@ class Coordinator: NSObject, MKMapViewDelegate {
       currentRegion.center.latitude != self.parent.viewModel.region.center.latitude
         || currentRegion.center.longitude != self.parent.viewModel.region.center.longitude
         || currentRegion.span.latitudeDelta != self.parent.viewModel.region.span.latitudeDelta
-        || currentRegion.span.longitudeDelta != self.parent.viewModel.region.longitudeDelta
+        || currentRegion.span.longitudeDelta != self.parent.viewModel.region.span.longitudeDelta
     {
       DispatchQueue.main.async {
         self.parent.viewModel.mapRegion = currentRegion

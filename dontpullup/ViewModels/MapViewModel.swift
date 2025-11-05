@@ -39,6 +39,7 @@ class MapViewModel: NSObject, ObservableObject {
   @Published var reportDraft = PinDraft()  // holds coord/type/url
   @Published var isLimitedFunctionalityDueToLocationDenial: Bool = false
   @Published var activeUploads: Int = 0  // Track number of active uploads
+  @Published var showingContentGuidelines = false  // Show content guidelines modal
   // Flag to remember that the user tapped center button before granting permission
   private var shouldCenterAfterAuthorization = false
   private var shouldCenterAfterLocationUpdate = false
@@ -131,6 +132,11 @@ class MapViewModel: NSObject, ObservableObject {
 
   func toggleEditMode() {
     isEditMode.toggle()
+  }
+
+  func acceptContentGuidelines() {
+    showingContentGuidelines = false
+    UserDefaults.standard.set(true, forKey: "hasAcceptedContentGuidelines")
   }
 
   // MARK: - Zoom helpers
