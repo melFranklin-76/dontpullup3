@@ -2,12 +2,14 @@ import Foundation
 import FirebaseFirestore
 import FirebaseAuth
 import UserNotifications
+import FirebaseFunctions
 
 @MainActor
 class NotificationManager: ObservableObject {
     static let shared = NotificationManager()
     
     private let db = Firestore.firestore()
+    private let functions = Functions.functions()
     private let baseURL = "https://fcm.googleapis.com/fcm/send"
     
     private init() {
@@ -31,60 +33,68 @@ class NotificationManager: ObservableObject {
     ///   - pin: The pin that was dropped
     ///   - zipCode: The zip code to notify users in
     func notifyUsersInZipCode(for pin: Pin, zipCode: String) async {
-        print("[NotificationManager] Sending notifications for new pin in zip code: \(zipCode)")
+        print("[NotificationManager] Start notifying users for pin ID: \(pin.id) in zip code: \(zipCode)")
         
-        // Immediately send a local notification to the current device for testing
-        // This ensures notifications work regardless of FCM status
+        // Immediately send a local notification to the current device for testing/dev feedback
         print("[NotificationManager] Sending immediate local notification for testing")
         let testNotification = createNotificationPayload(for: pin)
         await sendLocalNotification(title: testNotification.title, body: testNotification.body, data: testNotification.data)
         
         do {
-            // Get all users in the same zip code with valid FCM tokens
+            // Get all users in the same zip code
             let usersToNotify = try await getUsersInZipCode(zipCode, excludingUserId: pin.userId)
+            
+            // Detailed log of users and their FCM token status
+            print("[NotificationManager] Users fetched for notification:")
+            for user in usersToNotify {
+                if let token = user.fcmToken, !token.isEmpty {
+                    print("  - User ID: \(user.id), Email: \(user.email), FCM Token: valid")
+                } else {
+                    print("  - User ID: \(user.id), Email: \(user.email), FCM Token: MISSING or EMPTY - user will be skipped for push notification")
+                }
+            }
             
             if usersToNotify.isEmpty {
                 print("[NotificationManager] No users to notify in zip code: \(zipCode)")
                 // For testing: send a local notification even if no other users
                 await sendLocalTestNotification(for: pin)
+                print("[NotificationManager] Finished notifying users for pin ID: \(pin.id) in zip code: \(zipCode)")
+                return
+            }
+            
+            // Collect all valid FCM tokens for production push notification
+            let recipientTokens = usersToNotify.compactMap { user -> String? in
+                guard let token = user.fcmToken, !token.isEmpty else {
+                    return nil
+                }
+                return token
+            }
+            
+            print("[NotificationManager] Collected recipient FCM tokens: \(recipientTokens)")
+            
+            if recipientTokens.isEmpty {
+                print("[NotificationManager] No valid FCM tokens found among users to notify in zip code: \(zipCode)")
+                // No real push notifications can be sent, only local dev notifications on current device
+                await sendLocalTestNotification(for: pin)
+                print("[NotificationManager] Finished notifying users for pin ID: \(pin.id) in zip code: \(zipCode)")
                 return
             }
             
             // Create notification payload
             let notificationData = createNotificationPayload(for: pin)
             
-            // Variables to track notification attempts
-            var notificationsSent = 0
-            var localNotificationsSent = 0
+            // PRODUCTION PUSH NOTIFICATION: send via Cloud Function to all recipients
+            await sendPushNotification(
+                to: recipientTokens,
+                title: notificationData.title,
+                body: notificationData.body,
+                data: notificationData.data
+            )
             
-            // Send notifications to all users
-            for user in usersToNotify {
-                if let fcmToken = user.fcmToken, !fcmToken.isEmpty {
-                await sendPushNotification(
-                    to: fcmToken,
-                    title: notificationData.title,
-                    body: notificationData.body,
-                    data: notificationData.data
-                )
-                    notificationsSent += 1
-                } else {
-                    // No FCM token, but still deliver a local notification if this is the current device
-                    print("[NotificationManager] User \(user.id) has no FCM token - using local notification as fallback")
-                    if Auth.auth().currentUser?.uid == user.id {
-                        await sendLocalNotification(
-                            title: notificationData.title,
-                            body: notificationData.body,
-                            data: notificationData.data
-                        )
-                        localNotificationsSent += 1
-                    }
-                }
-            }
-            
-            print("[NotificationManager] Notification summary: \(notificationsSent) FCM, \(localNotificationsSent) local notifications sent to \(usersToNotify.count) users in zip code: \(zipCode)")
+            print("[NotificationManager] Finished notifying users for pin ID: \(pin.id) in zip code: \(zipCode)")
             
         } catch {
-            print("[NotificationManager] Error sending notifications: \(error.localizedDescription)")
+            print("[NotificationManager] Error sending notifications for pin ID: \(pin.id) in zip code: \(zipCode): \(error.localizedDescription)")
         }
     }
     
@@ -92,10 +102,15 @@ class NotificationManager: ObservableObject {
     private func getUsersInZipCode(_ zipCode: String, excludingUserId: String) async throws -> [UserProfile] {
         print("[NotificationManager] Searching for users in zip code: \(zipCode), excluding user: \(excludingUserId)")
         
-        // Simplified query - only filter by zipCode, handle fcmToken in app logic
-        let snapshot = try await db.collection("users")
-            .whereField("zipCode", isEqualTo: zipCode)
-            .getDocuments()
+        var snapshot: QuerySnapshot
+        do {
+            snapshot = try await db.collection("users")
+                .whereField("zipCode", isEqualTo: zipCode)
+                .getDocuments()
+        } catch {
+            print("[NotificationManager] Firestore error fetching users in zip code \(zipCode): \(error.localizedDescription)")
+            throw error
+        }
         
         print("[NotificationManager] Found \(snapshot.documents.count) total users in zip code \(zipCode)")
         
@@ -105,27 +120,22 @@ class NotificationManager: ObservableObject {
             let data = document.data()
             let userId = document.documentID
             
-            print("[NotificationManager] Checking user \(userId):")
-            print("  - zipCode: \(data["zipCode"] ?? "missing")")
-            print("  - email: \(data["email"] ?? "missing")")
-            print("  - fcmToken: \(data["fcmToken"] ?? "missing")")
-            
             // Skip the user who dropped the pin
-            if document.documentID == excludingUserId {
-                print("[NotificationManager] Skipping user \(userId) - is the pin creator")
+            if userId == excludingUserId {
+                print("[NotificationManager] Skipped user \(userId) - is the pin creator")
                 continue
             }
             
-            // TEMPORARY: Allow users without FCM tokens for debugging
+            // Check FCM token presence
             let fcmToken = data["fcmToken"] as? String
             if fcmToken == nil || fcmToken?.isEmpty == true {
-                print("[NotificationManager] User \(userId) has no FCM token - but including for debugging")
-                // Continue anyway for debugging
+                print("[NotificationManager] Skipped user \(userId) - missing or empty FCM token")
+                continue
             }
             
-            if let userProfile = UserProfile.fromFirestoreData(id: document.documentID, data: data) {
+            if let userProfile = UserProfile.fromFirestoreData(id: userId, data: data) {
                 users.append(userProfile)
-                print("[NotificationManager] Added user \(userId) to notification list")
+                print("[NotificationManager] Added user \(userId) to notification list (valid FCM token)")
             } else {
                 print("[NotificationManager] Failed to create UserProfile for user \(userId)")
             }
@@ -133,7 +143,7 @@ class NotificationManager: ObservableObject {
         
         print("[NotificationManager] Final notification list: \(users.count) users")
         for user in users {
-            print("  - User: \(user.id), Email: \(user.email), ZipCode: \(user.zipCode)")
+            print("  - User: \(user.id), Email: \(user.email), ZipCode: \(user.zipCode), FCM Token valid")
         }
         
         return users
@@ -155,19 +165,28 @@ class NotificationManager: ObservableObject {
         return (title: title, body: body, data: data)
     }
     
-    /// Sends a push notification using Firebase Cloud Messaging
-    private func sendPushNotification(to fcmToken: String, title: String, body: String, data: [String: String]) async {
-        // For testing: also send local notification to current device
-        await sendLocalNotification(title: title, body: body, data: data)
+    /// Sends a push notification using Firebase Cloud Functions
+    /// - Parameters:
+    ///   - tokens: The array of FCM tokens to send the notification to
+    ///   - title: Notification title
+    ///   - body: Notification body
+    ///   - data: Additional data payload
+    private func sendPushNotification(to tokens: [String], title: String, body: String, data: [String: String]) async {
+        // PRODUCTION PUSH: send notification via Cloud Function
+        let payload: [String: Any] = [
+            "tokens": tokens,
+            "title": title,
+            "body": body,
+            "data": data
+        ]
         
-        print("[NotificationManager] Sent local notification instead of FCM:")
-        print("  Token: \(fcmToken.prefix(10))...")
-        print("  Title: \(title)")
-        print("  Body: \(body)")
-        print("  Data: \(data)")
-        
-        // TODO: Implement actual FCM API call through your backend
-        // This requires a server key which should never be stored in client code
+        do {
+            let result = try await functions.httpsCallable("sendIncidentNotification").call(payload)
+            // Ideally result.data would contain info about success/failure counts
+            print("[NotificationManager] Cloud Function sendIncidentNotification called successfully. Attempted to send to \(tokens.count) tokens. Result: \(result.data)")
+        } catch {
+            print("[NotificationManager] Error calling Cloud Function sendIncidentNotification: \(error.localizedDescription)")
+        }
     }
     
     /// Sends a local notification for testing when no other users exist
