@@ -58,6 +58,10 @@ class MapViewModel: NSObject, ObservableObject {
   // MARK: - Private Properties
   private let locationManager = CLLocationManager()
   private let db = Firestore.firestore()
+  
+  // Geographic filtering properties
+  private var lastQueriedRegion: MKCoordinateRegion?
+  private let minimumRegionChangeThreshold: Double = 0.3 // 30% change triggers reload
 
   // MARK: - Computed Properties
   var filteredPins: [Pin] {
@@ -726,68 +730,70 @@ class MapViewModel: NSObject, ObservableObject {
 
   private func loadPins() {
     print("[MapViewModel] Loading pins from Firestore")
-    db.collection("pins").addSnapshotListener { [weak self] snapshot, error in
-      guard let self = self else { return }
-
-      if let error = error {
-        print("[MapViewModel] Error loading pins: \(error.localizedDescription)")
-        self.showError("Failed to load pins: \(error.localizedDescription)")
+    
+    // Check if we need to refresh based on region change
+    if let lastRegion = lastQueriedRegion {
+      let currentCenter = region.center
+      let lastCenter = lastRegion.center
+      
+      // Calculate change in region (using span as proxy for zoom level)
+      let latChange = abs(region.span.latitudeDelta - lastRegion.span.latitudeDelta) / lastRegion.span.latitudeDelta
+      let lonChange = abs(region.span.longitudeDelta - lastRegion.span.longitudeDelta) / lastRegion.span.longitudeDelta
+      
+      // Calculate change in center position
+      let centerLatChange = abs(currentCenter.latitude - lastCenter.latitude) / lastRegion.span.latitudeDelta
+      let centerLonChange = abs(currentCenter.longitude - lastCenter.longitude) / lastRegion.span.longitudeDelta
+      
+      // Only reload if region changed significantly
+      if latChange < minimumRegionChangeThreshold && 
+         lonChange < minimumRegionChangeThreshold &&
+         centerLatChange < minimumRegionChangeThreshold &&
+         centerLonChange < minimumRegionChangeThreshold {
+        print("[MapViewModel] Skipping pin reload - region change too small")
         return
-      }
-
-      guard let documents = snapshot?.documents else {
-        print("[MapViewModel] No pins found")
-        return
-      }
-
-      print("[MapViewModel] Found \(documents.count) pins")
-
-      Task { @MainActor in
-        let loadedPins = documents.compactMap { document -> Pin? in
-          let data = document.data()
-
-          guard let idString = data["id"] as? String,
-            let latitudeValue = data["latitude"] as? Double,
-            let longitudeValue = data["longitude"] as? Double,
-            let typeString = data["type"] as? String,
-            let userIdString = data["userId"] as? String
-          else {
-            print("[MapViewModel] Invalid pin data in document \(document.documentID)")
-            print(
-              "[MapViewModel] Pin data fields - id: \(data["id"] ?? "missing"), latitude: \(data["latitude"] ?? "missing"), longitude: \(data["longitude"] ?? "missing"), type: \(data["type"] ?? "missing"), userId: \(data["userId"] ?? "missing")"
-            )
-            return nil
-          }
-
-          let coordinate = CLLocationCoordinate2D(
-            latitude: latitudeValue, longitude: longitudeValue)
-          let videoURL = data["videoURL"] as? String ?? ""
-          let zipCode = data["zipCode"] as? String ?? ""  // Get zip code if available
-
-          let incidentType = IncidentType.fromFirestoreType(typeString)
-
-          var pin = Pin(
-            id: idString,
-            coordinate: coordinate,
-            incidentType: incidentType,
-            videoURL: videoURL,
-            userId: userIdString
-          )
-
-          pin.zipCode = zipCode  // Set zip code
-
-          // If pin doesn't have a zip code, try to determine it based on current user's zip code
-          if zipCode.isEmpty, let userProfile = self.authManager.currentUserProfile {
-            pin.zipCode = userProfile.zipCode
-          }
-
-          return pin
-        }
-
-        self.pins = loadedPins
-        print("[MapViewModel] Successfully loaded \(loadedPins.count) pins")
       }
     }
+    
+    // Update last queried region
+    lastQueriedRegion = region
+    
+    // Use geographic filtering to load only pins in visible region
+    let center = region.center
+    
+    // Calculate radius based on span (in km)
+    // Approximate: 1 degree latitude ≈ 111 km
+    let latRadiusKm = (region.span.latitudeDelta / 2.0) * 111.0
+    let lonRadiusKm = (region.span.longitudeDelta / 2.0) * 111.0 * cos(center.latitude * .pi / 180.0)
+    let radiusKm = max(latRadiusKm, lonRadiusKm) * 1.5  // Add 50% buffer
+    
+    print("[MapViewModel] Loading pins for region centered at \(center.latitude), \(center.longitude) with radius \(radiusKm) km")
+    
+    Task {
+      do {
+        let loadedPins = try await FirestorePins.getPinsInRegion(
+          center: center,
+          radiusKm: radiusKm,
+          limit: 500
+        )
+        
+        await MainActor.run {
+          self.pins = loadedPins
+          print("[MapViewModel] Successfully loaded \(loadedPins.count) pins in region")
+        }
+      } catch {
+        print("[MapViewModel] Error loading pins: \(error.localizedDescription)")
+        await MainActor.run {
+          self.showError("Failed to load pins: \(error.localizedDescription)")
+        }
+      }
+    }
+  }
+  
+  /// Refreshes pins for the current map region
+  /// Called when the map region changes significantly
+  @MainActor
+  func refreshPinsForCurrentRegion() {
+    loadPins()
   }
 
   @MainActor
@@ -1021,60 +1027,62 @@ class MapViewModel: NSObject, ObservableObject {
                 // Store the continuation outside the Task so we can resume it properly
                 let localContinuation = continuation
 
-                // Use async/await instead of completion handler
-                do {
-                  try await db.collection("pins").document(pinId).setData(pinData)
-
-                  print("[MapViewModel] Successfully saved pin to Firestore")
-
-                  // Update the existing pin with video URL
-                  if let index = self.pins.firstIndex(where: { $0.id == pinId }) {
-                    self.pins[index] = Pin(
-                      id: pinId,
-                      coordinate: pinCoordinate,
-                      incidentType: incidentType,
-                      videoURL: downloadURL.absoluteString,
-                      userId: currentUserId
+                db.collection("pins").document(pinId).setData(pinData) { error in
+                  if let error = error {
+                    print(
+                      "[MapViewModel] Failed to save pin to Firestore: \(error.localizedDescription)"
                     )
-                    print("[MapViewModel] Updated pin with video URL")
-                  }
-
-                  self.activeUploads = max(0, self.activeUploads - 1)
-                  self.uploadProgress = 1.0
-
-                  // Clear progress after a brief delay
-                  Task {
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)  // 1 second
-
-                    // Ensure we're on the main actor
-                    await MainActor.run {
+                    // Remove the pin from local array since Firestore save failed
+                    Task { @MainActor in
+                      self.pins.removeAll { $0.id == pinId }
+                      self.activeUploads = max(0, self.activeUploads - 1)
                       self.uploadProgress = 0
                     }
+                    // Resume the continuation outside of Task
+                    localContinuation.resume(throwing: error)
+                  } else {
+                    print("[MapViewModel] Successfully saved pin to Firestore")
+
+                    // Update the existing pin with video URL
+                    Task { @MainActor in
+                      if let index = self.pins.firstIndex(where: { $0.id == pinId }) {
+                        self.pins[index] = Pin(
+                          id: pinId,
+                          coordinate: pinCoordinate,
+                          incidentType: incidentType,
+                          videoURL: downloadURL.absoluteString,
+                          userId: currentUserId
+                        )
+                        print("[MapViewModel] Updated pin with video URL")
+                      }
+
+                      self.activeUploads = max(0, self.activeUploads - 1)
+                      self.uploadProgress = 1.0
+
+                      // Clear progress after a brief delay
+                      Task {
+                        try? await Task.sleep(nanoseconds: 1_000_000_000)  // 1 second
+
+                        // Ensure we're on the main actor
+                        await MainActor.run {
+                          self.uploadProgress = 0
+                        }
+                      }
+
+                      // Send notifications to users in the same zip code
+                      await self.sendZipCodeNotifications(
+                        for: Pin(
+                          id: pinId,
+                          coordinate: pinCoordinate,
+                          incidentType: incidentType,
+                          videoURL: downloadURL.absoluteString,
+                          userId: currentUserId
+                        ))
+                    }
+
+                    // Resume the continuation outside of Task
+                    localContinuation.resume(returning: ())
                   }
-
-                  // Send notifications to users in the same zip code
-                  await self.sendZipCodeNotifications(
-                    for: Pin(
-                      id: pinId,
-                      coordinate: pinCoordinate,
-                      incidentType: incidentType,
-                      videoURL: downloadURL.absoluteString,
-                      userId: currentUserId
-                    ))
-
-                  // Resume the continuation with success
-                  localContinuation.resume(returning: ())
-                } catch {
-                  print(
-                    "[MapViewModel] Failed to save pin to Firestore: \(error.localizedDescription)"
-                  )
-                  // Remove the pin from local array since Firestore save failed
-                  self.pins.removeAll { $0.id == pinId }
-                  self.activeUploads = max(0, self.activeUploads - 1)
-                  self.uploadProgress = 0
-
-                  // Resume the continuation with error
-                  localContinuation.resume(throwing: error)
                 }
               }
             }
