@@ -258,6 +258,18 @@ func presentVideoRecorder(
 ) {
   // Capture the raw presentationMode.wrappedValue to avoid capturing Binding in closure (Sendable warning)
   let presentationModeValue = presentationMode.wrappedValue
+  // Check if camera is available (not available on simulators)
+  guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
+    DispatchQueue.main.async {
+      #if targetEnvironment(simulator)
+      showGlobalErrorBanner("Camera is not available on simulator. Please use a physical device to record videos.")
+      #else
+      showGlobalErrorBanner("Camera is not available on this device.")
+      #endif
+    }
+    return
+  }
+  
   AVCaptureDevice.requestAccess(for: .video) { granted in
     DispatchQueue.main.async {
       if granted {
