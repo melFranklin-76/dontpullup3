@@ -344,12 +344,13 @@ class Coordinator: NSObject, MKMapViewDelegate {
   }
   
   func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
-    // Update the view model's region
-    parent.viewModel.region = mapView.region
-    
-    // Refresh pins for the new region
-    // Throttled automatically by loadPins() to avoid excessive queries
-    parent.viewModel.refreshPinsForCurrentRegion()
+    // Defer state updates to avoid "Publishing changes from within view updates" warning
+    // This delegate is called during MapKit's rendering cycle, so we need to defer
+    // any Published property changes to the next run loop iteration
+    Task { @MainActor in
+      parent.viewModel.region = mapView.region
+      parent.viewModel.refreshPinsForCurrentRegion()
+    }
   }
 
   func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {

@@ -702,7 +702,10 @@ class MapViewModel: NSObject, ObservableObject {
       await checkInitialLocationStatus()
     }
 
-    loadPins()
+    // Defer loadPins() to avoid publishing changes during view initialization
+    Task { @MainActor in
+      loadPins()
+    }
 
     // Clean up any invalid pins on startup
     Task {
@@ -1390,7 +1393,16 @@ class MapViewModel: NSObject, ObservableObject {
   @MainActor
   func cleanupInvalidPins() async {
     print("[MapViewModel] Starting cleanup of invalid pins...")
-    let snapshot = try? await db.collection("pins").getDocuments()
+    
+    // Only clean up pins belonging to the current user
+    guard let currentUserId = Auth.auth().currentUser?.uid else {
+      print("[MapViewModel] No current user, skipping cleanup")
+      return
+    }
+    
+    let snapshot = try? await db.collection("pins")
+      .whereField("userId", isEqualTo: currentUserId)
+      .getDocuments()
 
     guard let documents = snapshot?.documents else {
       print("[MapViewModel] No documents found for cleanup")
