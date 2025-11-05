@@ -159,12 +159,40 @@ struct MapView: UIViewRepresentable {
     defaults.synchronize()
   }
 
-  func updateUIView(_ mapView: MKMapView, context: Context) {
-    // Remove debug logging
-    if !context.coordinator.hasLoggedMapStatus {
-      context.coordinator.hasLoggedMapStatus = true
+  func updateUIView(_ view: MKMapView, context: Context) {
+    // Handle region changes
+    if let mapRegion = viewModel.mapRegion {
+      view.setRegion(mapRegion, animated: true)
+      // Reset mapRegion to nil after applying it to avoid reapplying the same region
+      DispatchQueue.main.async {
+        viewModel.mapRegion = nil
+      }
     }
 
+    // Handle pin updates
+    updatePins(on: view)
+  }
+
+  func makeCoordinator() -> Coordinator {
+    let coordinator = Coordinator(self)
+
+    // Add observer in coordinator so it can be properly cleaned up
+    NotificationCenter.default.addObserver(
+      coordinator,
+      selector: #selector(Coordinator.handleMapRegionChanged),
+      name: Notification.Name("MapRegionChanged"),
+      object: nil)
+
+    return coordinator
+  }
+
+  // Add overlay to display upload progress
+  static func dismantleUIView(_ uiView: MKMapView, coordinator: Coordinator) {
+    // Clean up when view is removed
+  }
+
+  // Helper function to update pins on the map
+  private func updatePins(on mapView: MKMapView) {
     // Update map type with animation if needed
     if mapView.mapType != viewModel.mapType {
       UIView.animate(withDuration: 0.3) {
@@ -198,44 +226,6 @@ struct MapView: UIViewRepresentable {
       mapView.removeAnnotations(annotationsToRemove)
       mapView.addAnnotations(newAnnotations)
     }
-
-    // Update region if needed and enforce minimum zoom
-    if let newRegion = viewModel.mapRegion {
-      let enforcedSpan = MKCoordinateSpan(
-        latitudeDelta: max(newRegion.span.latitudeDelta, MapViewConstants.minSpan.latitudeDelta),
-        longitudeDelta: max(newRegion.span.longitudeDelta, MapViewConstants.minSpan.longitudeDelta)
-      )
-
-      let region = MKCoordinateRegion(
-        center: newRegion.center,
-        span: enforcedSpan
-      )
-
-      // Only update region if it's significantly different
-      let currentCenter = mapView.region.center
-      let newCenter = region.center
-      let distance = MKMapPoint(currentCenter).distance(to: MKMapPoint(newCenter))
-
-      if distance > 100  // If centers are more than 100 points apart
-        || abs(mapView.region.span.latitudeDelta - region.span.latitudeDelta) > 0.01
-      {
-        mapView.setRegion(region, animated: true)
-      }
-
-      // Reset region after animation
-      DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak viewModel] in
-        viewModel?.mapRegion = nil
-      }
-    }
-  }
-
-  func makeCoordinator() -> Coordinator {
-    Coordinator(self)
-  }
-
-  // Add overlay to display upload progress
-  static func dismantleUIView(_ uiView: MKMapView, coordinator: Coordinator) {
-    // Clean up when view is removed
   }
 }
 
@@ -286,14 +276,31 @@ class Coordinator: NSObject, MKMapViewDelegate {
 
   init(_ parent: MapView) {
     self.parent = parent
+    super.init()
+  }
+
+  deinit {
+    // Clean up notification observers
+    NotificationCenter.default.removeObserver(self)
   }
 
   @objc func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
+    print("[MapView] Long press detected - state: \(gesture.state.rawValue)")
+
     // Respond to long-press only when NOT in delete-edit mode
-    guard gesture.state == .began, parent.viewModel.isEditMode == false else { return }
+    guard gesture.state == .began else {
+      print("[MapView] Long press ignored - wrong state")
+      return
+    }
+
+    guard parent.viewModel.isEditMode == false else {
+      print("[MapView] Long press ignored - in edit mode")
+      return
+    }
 
     // Check if user is anonymous first
     if parent.viewModel.authState.isAnonymous {
+      print("[MapView] Long press blocked - user is anonymous")
       parent.viewModel.showError("Guests cannot drop new pins.")
       return
     }
@@ -301,14 +308,21 @@ class Coordinator: NSObject, MKMapViewDelegate {
     let point = gesture.location(in: gesture.view)
     let coordinate = (gesture.view as? MKMapView)?.convert(point, toCoordinateFrom: gesture.view)
 
-    guard let validCoordinate = coordinate else { return }
+    guard let validCoordinate = coordinate else {
+      print("[MapView] Long press failed - invalid coordinate")
+      return
+    }
 
     // Check authentication first
     guard Auth.auth().currentUser != nil else {
+      print("[MapView] Long press blocked - no current user")
       parent.viewModel.showError("You need to sign in to drop pins")
       return
     }
 
+    print(
+      "[MapView] Long press successful - calling handleLocationAction with coordinate: \(validCoordinate)"
+    )
     // Use the unified location handler for pin drop
     parent.viewModel.handleLocationAction(.pinDrop(validCoordinate))
   }
@@ -327,6 +341,15 @@ class Coordinator: NSObject, MKMapViewDelegate {
           span: MapViewConstants.minSpan
         ), animated: false)
     }
+  }
+  
+  func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
+    // Update the view model's region
+    parent.viewModel.region = mapView.region
+    
+    // Refresh pins for the new region
+    // Throttled automatically by loadPins() to avoid excessive queries
+    parent.viewModel.refreshPinsForCurrentRegion()
   }
 
   func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
@@ -618,18 +641,27 @@ class Coordinator: NSObject, MKMapViewDelegate {
 
   // Generic helper to present a view controller and wait for completion
   private func presentViewController(
-    _ viewControllerToPresent: UIViewController, on presentingViewController: UIViewController,
+    _ viewControllerToPresent: UIViewController,
+    on presentingViewController: UIViewController,
     animated: Bool
   ) async throws {
-    // Use continuation to bridge completion handler and handle potential errors
-    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+    // Prevent double-presentations that would leave a continuation unresumed
+    guard presentingViewController.presentedViewController == nil else {
+      print("[presentViewController] Attempt to present while another VC is already presented. Aborting.")
+      throw NSError(
+        domain: "PresentationError",
+        code: 1,
+        userInfo: [NSLocalizedDescriptionKey: "A view controller is already being presented. Presentation was aborted to avoid leaking continuation."])
+    }
+
+    try await withCheckedThrowingContinuation { continuation in
       presentingViewController.present(viewControllerToPresent, animated: animated) {
-        // Check if the presentation actually succeeded if possible (though usually completion implies success)
-        // If presentation could fail silently, more checks might be needed here.
         continuation.resume()
       }
+      // Note: If UIKit fails to present (should never happen if guard passes), the completion handler won't be called.
+      // Optionally, add a timeout or other safety here if you want even more robustness.
     }
-    print("Presentation completion handler executed for \(type(of: viewControllerToPresent))")  // Debug log
+    print("Presentation completion handler executed for \(type(of: viewControllerToPresent))")
   }
 
   func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
@@ -642,6 +674,9 @@ class Coordinator: NSObject, MKMapViewDelegate {
     {
       DispatchQueue.main.async {
         self.parent.viewModel.mapRegion = mapView.region
+        // Refresh pins when region changes significantly (geographic filtering)
+        // Throttled automatically by loadPins() to avoid excessive queries
+        self.parent.viewModel.refreshPinsForCurrentRegion()
       }
     }
   }
@@ -659,6 +694,20 @@ class Coordinator: NSObject, MKMapViewDelegate {
     // Store the player reference and show SwiftUI report view
     parent.currentVideoPlayer = playerVC
     parent.showingReportVideo = true
+  }
+
+  @objc func handleMapRegionChanged() {
+    // Handle region change notification
+    if let currentRegion = self.parent.viewModel.mapRegion,
+      currentRegion.center.latitude != self.parent.viewModel.region.center.latitude
+        || currentRegion.center.longitude != self.parent.viewModel.region.center.longitude
+        || currentRegion.span.latitudeDelta != self.parent.viewModel.region.span.latitudeDelta
+        || currentRegion.span.longitudeDelta != self.parent.viewModel.region.span.longitudeDelta
+    {
+      DispatchQueue.main.async {
+        self.parent.viewModel.mapRegion = currentRegion
+      }
+    }
   }
 }
 
@@ -701,16 +750,14 @@ struct MapViewWithReportSheet: View {
           if let playerVC = currentVideoPlayer {
             playerVC.dismiss(animated: true) {
               // Show confirmation alert after player is dismissed
-              if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                let rootVC = scene.windows.first?.rootViewController
-              {
+              if let topVC = topMostViewController() {
                 let confirmAlert = UIAlertController(
                   title: "Report Submitted",
                   message: "Thank you. We'll review this video and contact you at \(email).",
                   preferredStyle: .alert
                 )
                 confirmAlert.addAction(UIAlertAction(title: "OK", style: .default))
-                rootVC.present(confirmAlert, animated: true)
+                topVC.present(confirmAlert, animated: true)
               }
             }
           }
@@ -761,21 +808,13 @@ func playVideo(for pin: Pin) {
             userInfo: [NSLocalizedDescriptionKey: "This pin has no video attached."])
           print("Error during video playback: \(error)")
 
-          // Show error alert
+          // Show error alert using topMostViewController
           let alert = UIAlertController(
             title: "Video Unavailable", message: "This pin has no video attached.",
             preferredStyle: .alert)
           alert.addAction(UIAlertAction(title: "OK", style: .default))
 
-          if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-            let rootVC = windowScene.windows.first?.rootViewController
-          {
-            var topVC = rootVC
-            while let presentedVC = topVC.presentedViewController {
-              topVC = presentedVC
-            }
-            topVC.present(alert, animated: true)
-          }
+          topMostViewController()?.present(alert, animated: true)
         }
       } catch {
         print("[MapView] Error refreshing pin data: \(error.localizedDescription)")
@@ -784,15 +823,7 @@ func playVideo(for pin: Pin) {
           preferredStyle: .alert)
         errorAlert.addAction(UIAlertAction(title: "OK", style: .default))
 
-        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-          let rootVC = windowScene.windows.first?.rootViewController
-        {
-          var topVC = rootVC
-          while let presentedVC = topVC.presentedViewController {
-            topVC = presentedVC
-          }
-          topVC.present(errorAlert, animated: true)
-        }
+        topMostViewController()?.present(errorAlert, animated: true)
       }
     }
     return
@@ -848,21 +879,13 @@ func playVideoWithURL(_ videoURL: String, for pin: Pin) {
       userInfo: [NSLocalizedDescriptionKey: "This pin has no video attached."])
     print("Error during video playback: \(error)")
 
-    // Show error alert
+    // Show error alert using topMostViewController
     let alert = UIAlertController(
       title: "Video Unavailable", message: "This pin has no video attached.", preferredStyle: .alert
     )
     alert.addAction(UIAlertAction(title: "OK", style: .default))
 
-    if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-      let rootVC = windowScene.windows.first?.rootViewController
-    {
-      var topVC = rootVC
-      while let presentedVC = topVC.presentedViewController {
-        topVC = presentedVC
-      }
-      topVC.present(alert, animated: true)
-    }
+    topMostViewController()?.present(alert, animated: true)
     return
   }
 
@@ -874,14 +897,7 @@ func playVideoWithURL(_ videoURL: String, for pin: Pin) {
     playerViewController.player = player
 
     // Find the view controller to present from
-    if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-      let rootVC = windowScene.windows.first?.rootViewController
-    {
-      var topVC = rootVC
-      while let presentedVC = topVC.presentedViewController {
-        topVC = presentedVC
-      }
-
+    if let topVC = topMostViewController() {
       topVC.present(playerViewController, animated: true) {
         print("Presentation completion handler executed for AVPlayerViewController")
         player.play()
