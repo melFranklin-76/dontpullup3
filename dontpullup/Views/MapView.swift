@@ -664,23 +664,6 @@ class Coordinator: NSObject, MKMapViewDelegate {
     print("Presentation completion handler executed for \(type(of: viewControllerToPresent))")
   }
 
-  func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
-    // Silently update the map region without debug logs
-    if let currentRegion = self.parent.viewModel.mapRegion,
-      currentRegion.center.latitude != mapView.region.center.latitude
-        || currentRegion.center.longitude != mapView.region.center.longitude
-        || currentRegion.span.latitudeDelta != mapView.region.span.latitudeDelta
-        || currentRegion.span.longitudeDelta != mapView.region.span.longitudeDelta
-    {
-      DispatchQueue.main.async {
-        self.parent.viewModel.mapRegion = mapView.region
-        // Refresh pins when region changes significantly (geographic filtering)
-        // Throttled automatically by loadPins() to avoid excessive queries
-        self.parent.viewModel.refreshPinsForCurrentRegion()
-      }
-    }
-  }
-
   @objc private func flagButtonTapped() {
     guard let rootVC = getRootViewController(),
       let playerVC = rootVC.presentedViewController as? AVPlayerViewController
@@ -702,7 +685,7 @@ class Coordinator: NSObject, MKMapViewDelegate {
       currentRegion.center.latitude != self.parent.viewModel.region.center.latitude
         || currentRegion.center.longitude != self.parent.viewModel.region.center.longitude
         || currentRegion.span.latitudeDelta != self.parent.viewModel.region.span.latitudeDelta
-        || currentRegion.span.longitudeDelta != self.parent.viewModel.region.span.longitudeDelta
+        || currentRegion.span.longitudeDelta != self.parent.viewModel.region.longitudeDelta
     {
       DispatchQueue.main.async {
         self.parent.viewModel.mapRegion = currentRegion
@@ -915,3 +898,4 @@ func playVideoWithURL(_ videoURL: String, for pin: Pin) {
     print("Invalid video URL format")
   }
 }
+
