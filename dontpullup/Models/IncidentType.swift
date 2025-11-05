@@ -1,7 +1,7 @@
 import Foundation
 import SwiftUI
 
-public enum IncidentType: String, CaseIterable, Codable {
+public enum IncidentType: String, CaseIterable, Codable, Sendable {
     case verbal = "Verbal"
     case physical = "Physical"
     case emergency = "Emergency"
@@ -72,3 +72,4 @@ public enum IncidentType: String, CaseIterable, Codable {
         }
     }
 } 
+
