@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDisplayName</key>
-	<string>Don't Pull Up</string>
+	<string>Don&apos;t Pull Up</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -11,9 +11,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<string>3.5</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>350</string>
 	<key>FirebaseAppDelegateProxyEnabled</key>
 	<true/>
 	<key>ITSAppUsesNonExemptEncryption</key>
@@ -24,10 +24,6 @@
 	<string>High</string>
 	<key>MetalCaptureEnabled</key>
 	<false/>
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>remote-notification</string>
-	</array>
 	<key>SKStoreKitClearSandbox</key>
 	<string>NO</string>
 	<key>SKAdNetworkItems</key>
