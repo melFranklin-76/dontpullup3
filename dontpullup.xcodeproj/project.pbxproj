@@ -40,7 +40,6 @@
 				LEGAL_COMPLIANCE_CHECKLIST.md,
 				PrivacyInfo.xcprivacy,
 				README.md,
-				Resources/AuthenticationManager.swift,
 				Resources/MapStyles/default.csv,
 				Views/AuthStateView.swift,
 				Views/IntegrationPlan.md,

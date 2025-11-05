@@ -68,3 +68,6 @@ GoogleService-Info.plist
 build/
 *.xcarchive
 DerivedData/
+.DS_Store
+*/.DS_Store
+**/.DS_Store
