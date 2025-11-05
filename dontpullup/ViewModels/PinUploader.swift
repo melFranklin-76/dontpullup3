@@ -165,7 +165,9 @@ class PinUploader: ObservableObject {
 
     private func handleFirestoreError(_ error: NSError) {
         if error.domain == FirestoreErrorDomain {
-            switch FirestoreErrorCode(rawValue: error.code) {
+            // Use FirestoreErrorCode.Code for proper error code matching
+            let errorCode = FirestoreErrorCode.Code(rawValue: error.code)
+            switch errorCode {
             case .permissionDenied:
                 alertMessage = "You do not have permission to perform this action."
             case .invalidArgument:
