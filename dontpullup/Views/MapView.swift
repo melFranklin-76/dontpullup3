@@ -348,9 +348,9 @@ class Coordinator: NSObject, MKMapViewDelegate {
     // This delegate is called during MapKit's rendering cycle, so we need to explicitly
     // defer any Published property changes to the next run loop iteration
     let newRegion = mapView.region
-    DispatchQueue.main.async { [weak parent] in
-      parent?.viewModel.region = newRegion
-      parent?.viewModel.refreshPinsForCurrentRegion()
+    DispatchQueue.main.async {
+      self.parent.viewModel.region = newRegion
+      self.parent.viewModel.refreshPinsForCurrentRegion()
     }
   }
 
