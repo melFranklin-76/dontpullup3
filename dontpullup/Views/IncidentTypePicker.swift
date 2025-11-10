@@ -94,14 +94,15 @@ struct IncidentTypePicker: View {
   @State private var showMediaOptions = false
 
   var body: some View {
-    NoBounceScrollView {
-      VStack(spacing: 24) {
-        Text("Select Incident Type")
-          .font(.title)
-          .fontWeight(.bold)
-          .foregroundColor(.white)
-          .padding(.top, 24)
-          .padding(.bottom, 8)
+    ZStack {
+      NoBounceScrollView {
+        VStack(spacing: 24) {
+          Text("Select Incident Type")
+            .font(.title)
+            .fontWeight(.bold)
+            .foregroundColor(.white)
+            .padding(.top, 24)
+            .padding(.bottom, 8)
 
         // Incident type buttons with improved spacing
         VStack(spacing: 16) {
@@ -165,16 +166,26 @@ struct IncidentTypePicker: View {
         buttons: [
           .default(Text("Choose from Library")) {
             if selectedType != nil {
-              shouldPresentPicker = true
+              // Delay to ensure action sheet is fully dismissed before presenting picker
+              DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.shouldPresentPicker = true
+              }
             }
           },
           .default(Text("Record Video (3 min max)")) {
             if let type = selectedType {
-              // Capture current presentationMode.wrappedValue to avoid capturing Binding in closure and Sendable warnings
-              let presentationModeValue = presentationMode.wrappedValue
-              presentVideoRecorder(
-                for: type, viewModel: viewModel, presentationMode: Binding(get: { presentationModeValue }, set: { _ in }))
-              presentationMode.wrappedValue.dismiss()
+              // Check camera availability FIRST (for simulator compatibility)
+              #if targetEnvironment(simulator)
+              DispatchQueue.main.async {
+                showGlobalErrorBanner("Camera is not available on simulator. Please use a physical device to record videos.")
+              }
+              #else
+              // Delay to ensure action sheet is fully dismissed before presenting camera
+              DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                presentVideoRecorder(
+                  for: type, viewModel: self.viewModel, presentationMode: self.presentationMode)
+              }
+              #endif
             }
           },
           .cancel(),
@@ -184,12 +195,18 @@ struct IncidentTypePicker: View {
     .onChange(of: shouldPresentPicker) { newValue in
       if newValue, let type = selectedType {
         // Present immediately without delay to avoid view hierarchy issues
-        // Capture current presentationMode.wrappedValue to avoid capturing Binding in async closure
-        let presentationModeValue = presentationMode.wrappedValue
         presentVideoPickerDirectly(
-          for: type, viewModel: viewModel, presentationMode: Binding(get: { presentationModeValue }, set: { _ in }))
-        presentationMode.wrappedValue.dismiss()
+          for: type, viewModel: viewModel, presentationMode: presentationMode)
+        // Don't dismiss - let the delegate handle it after upload completes
         shouldPresentPicker = false
+      }
+    }
+      
+      // Show upload progress overlay when uploading
+      if viewModel.uploadProgress > 0 && viewModel.uploadProgress < 1.0 {
+        UploadProgressOverlay(viewModel: viewModel)
+          .transition(.opacity)
+          .animation(.easeInOut(duration: 0.3), value: viewModel.uploadProgress)
       }
     }
   }
@@ -201,10 +218,12 @@ func presentVideoPickerDirectly(
   for incidentType: IncidentType, viewModel: MapViewModel,
   presentationMode: Binding<PresentationMode>
 ) {
-  let presentationModeValue = presentationMode.wrappedValue
+  nonisolated(unsafe) let unsafePresentationMode = presentationMode
+  
   PHPhotoLibrary.requestAuthorization(for: .readWrite) { [viewModel, incidentType] status in
     Task { @MainActor in
-      let dismissalBinding = Binding(get: { presentationModeValue }, set: { _ in })
+      // Access the unsafe binding here - safe because we're back on MainActor
+      let dismissalBinding = unsafePresentationMode
       switch status {
       case .authorized, .limited:
         // Configure and present picker
@@ -256,8 +275,8 @@ func presentVideoRecorder(
   for incidentType: IncidentType, viewModel: MapViewModel,
   presentationMode: Binding<PresentationMode>
 ) {
-  // Capture the raw presentationMode.wrappedValue to avoid capturing Binding in closure (Sendable warning)
-  let presentationModeValue = presentationMode.wrappedValue
+  nonisolated(unsafe) let unsafePresentationMode = presentationMode
+  
   // Check if camera is available (not available on simulators)
   guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
     DispatchQueue.main.async {
@@ -270,8 +289,11 @@ func presentVideoRecorder(
     return
   }
   
-  AVCaptureDevice.requestAccess(for: .video) { granted in
+  AVCaptureDevice.requestAccess(for: .video) { [viewModel, incidentType] granted in
     DispatchQueue.main.async {
+      // Access the unsafe binding here - safe because we're back on main thread
+      let dismissalBinding = unsafePresentationMode
+      
       if granted {
         // Create and configure the image picker for video recording
         let imagePicker = UIImagePickerController()
@@ -284,7 +306,7 @@ func presentVideoRecorder(
 
         // Create the delegate adapter
         let delegateAdapter = VideoRecorderDelegateAdapter(
-          incidentType: incidentType, viewModel: viewModel, presentationMode: Binding(get: { presentationModeValue }, set: { _ in }))
+          incidentType: incidentType, viewModel: viewModel, presentationMode: dismissalBinding)
         VideoRecorderDelegateAdapter.activeDelegates.append(delegateAdapter)
         imagePicker.delegate = delegateAdapter
 
@@ -293,14 +315,13 @@ func presentVideoRecorder(
           let window = windowScene.windows.first,
           let rootVC = window.rootViewController
         {
-
           // Find the topmost presented controller
           var topController = rootVC
           while let presented = topController.presentedViewController {
             topController = presented
           }
 
-          // Present immediately
+          // Present the camera picker
           topController.present(imagePicker, animated: true) {
             print("[IncidentTypePicker] Video recorder presented successfully")
           }
@@ -397,30 +418,33 @@ class VideoDelegateAdapter: NSObject, PHPickerViewControllerDelegate {
     // Store the result for processing after dismissal
     let selectedResult = results.first
 
-    // Immediately dismiss the picker and IncidentTypePicker to reduce UI blocking
+    // Only dismiss the video picker, keep the incident type picker open to show progress
     picker.dismiss(animated: true) {
-      DispatchQueue.main.async {
-        // Access presentationMode.wrappedValue dismissal on main actor to avoid Sendable warnings
-        Task { @MainActor in
-          self.presentationMode.wrappedValue.dismiss()
+      if let result = selectedResult {
+        print("[VideoDelegateAdapter] User selected a video, starting processing...")
+
+        // Show immediate visual feedback
+        DispatchQueue.main.async {
+          self.viewModel.uploadProgress = 0.05
         }
 
-        // Wait for UI to settle before processing
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-          if let result = selectedResult {
-            print("[VideoDelegateAdapter] User selected a video, starting processing...")
-
-            // Show immediate visual feedback
-            self.viewModel.uploadProgress = 0.05
-
-            // Process video with proper error handling
-            Task {
-              await self.processVideoSafely(result)
+        // Process video with proper error handling
+        Task {
+          await self.processVideoSafely(result)
+          
+          // After successful processing, dismiss the incident type picker
+          await MainActor.run {
+            if self.viewModel.uploadProgress >= 0.9 || self.viewModel.uploadProgress == 0 {
+              self.presentationMode.wrappedValue.dismiss()
             }
-          } else {
-            print("[VideoDelegateAdapter] User canceled video selection")
-            self.viewModel.clearPendingData()
           }
+        }
+      } else {
+        print("[VideoDelegateAdapter] User canceled video selection")
+        DispatchQueue.main.async {
+          self.viewModel.clearPendingData()
+          // Dismiss on cancel
+          self.presentationMode.wrappedValue.dismiss()
         }
       }
     }
@@ -641,50 +665,57 @@ class VideoRecorderDelegateAdapter: NSObject, UIImagePickerControllerDelegate,
   ) {
     print("[VideoRecorderDelegateAdapter] Video recording finished")
 
-    // Dismiss the recorder and the incident type picker
+    // Only dismiss the camera/recorder, keep the incident type picker open to show progress
     picker.dismiss(animated: true) {
-      DispatchQueue.main.async {
-        // Access presentationMode.wrappedValue dismissal on main actor to avoid Sendable warnings
-        Task { @MainActor in
+      // Get the video URL from the info dictionary
+      guard let videoURL = info[.mediaURL] as? URL else {
+        print("[VideoRecorderDelegateAdapter] No video URL found")
+        DispatchQueue.main.async {
+          showGlobalErrorBanner("Failed to retrieve recorded video")
+          self.viewModel.clearPendingData()
+          // Dismiss on error
           self.presentationMode.wrappedValue.dismiss()
+        }
+        return
+      }
+
+      print("[VideoRecorderDelegateAdapter] Video recorded, starting processing...")
+
+      // Show immediate feedback
+      DispatchQueue.main.async {
+        self.viewModel.uploadProgress = 0.05
+      }
+
+      // Process video in background
+      Task {
+        await self.processVideoInBackground(videoURL)
+        
+        // After successful processing, dismiss the incident type picker
+        await MainActor.run {
+          if self.viewModel.uploadProgress >= 0.9 || self.viewModel.uploadProgress == 0 {
+            self.presentationMode.wrappedValue.dismiss()
+          }
         }
       }
     }
 
-    // Remove this delegate from the static array to avoid memory leaks (added here to cover dismissal path)
+    // Remove this delegate from the static array to avoid memory leaks
     Self.activeDelegates.removeAll { $0 === self }
-
-    // Get the video URL from the info dictionary
-    guard let videoURL = info[.mediaURL] as? URL else {
-      print("[VideoRecorderDelegateAdapter] No video URL found")
-      DispatchQueue.main.async {
-        showGlobalErrorBanner("Failed to retrieve recorded video")
-        self.viewModel.clearPendingData()
-      }
-      return
-    }
-
-    print("[VideoRecorderDelegateAdapter] Video recorded, starting processing...")
-
-    // Process video in background
-    Task.detached(priority: .userInitiated) {
-      await self.processVideoInBackground(videoURL)
-    }
   }
 
   func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
     print("[VideoRecorderDelegateAdapter] Video recording canceled")
 
-    // Dismiss the recorder but keep the incident type picker open
-    picker.dismiss(animated: true)
+    // Dismiss both the recorder and the incident type picker on cancel
+    picker.dismiss(animated: true) {
+      DispatchQueue.main.async {
+        self.viewModel.clearPendingData()
+        self.presentationMode.wrappedValue.dismiss()
+      }
+    }
 
     // Remove this delegate from the static array to avoid memory leaks
     Self.activeDelegates.removeAll { $0 === self }
-
-    // Clear any pending data
-    DispatchQueue.main.async {
-      self.viewModel.clearPendingData()
-    }
   }
 
   private func processVideoInBackground(_ videoURL: URL) async {

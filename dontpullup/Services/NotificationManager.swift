@@ -35,11 +35,6 @@ class NotificationManager: ObservableObject {
     func notifyUsersInZipCode(for pin: Pin, zipCode: String) async {
         print("[NotificationManager] Start notifying users for pin ID: \(pin.id) in zip code: \(zipCode)")
         
-        // Immediately send a local notification to the current device for testing/dev feedback
-        print("[NotificationManager] Sending immediate local notification for testing")
-        let testNotification = createNotificationPayload(for: pin)
-        await sendLocalNotification(title: testNotification.title, body: testNotification.body, data: testNotification.data)
-        
         do {
             // Get all users in the same zip code
             let usersToNotify = try await getUsersInZipCode(zipCode, excludingUserId: pin.userId)
@@ -56,8 +51,6 @@ class NotificationManager: ObservableObject {
             
             if usersToNotify.isEmpty {
                 print("[NotificationManager] No users to notify in zip code: \(zipCode)")
-                // For testing: send a local notification even if no other users
-                await sendLocalTestNotification(for: pin)
                 print("[NotificationManager] Finished notifying users for pin ID: \(pin.id) in zip code: \(zipCode)")
                 return
             }
@@ -74,8 +67,6 @@ class NotificationManager: ObservableObject {
             
             if recipientTokens.isEmpty {
                 print("[NotificationManager] No valid FCM tokens found among users to notify in zip code: \(zipCode)")
-                // No real push notifications can be sent, only local dev notifications on current device
-                await sendLocalTestNotification(for: pin)
                 print("[NotificationManager] Finished notifying users for pin ID: \(pin.id) in zip code: \(zipCode)")
                 return
             }
@@ -172,8 +163,11 @@ class NotificationManager: ObservableObject {
     ///   - body: Notification body
     ///   - data: Additional data payload
     private func sendPushNotification(to tokens: [String], title: String, body: String, data: [String: String]) async {
-        // PRODUCTION PUSH: send notification via Cloud Function
-        let payload: [String: Any] = [
+        print("[NotificationManager] 🚀 Calling Cloud Function to notify \(tokens.count) OTHER users")
+        print("[NotificationManager] 📝 Title: \(title)")
+        print("[NotificationManager] 📝 Body: \(body)")
+        
+        let payloadDict: [String: Any] = [
             "tokens": tokens,
             "title": title,
             "body": body,
@@ -181,11 +175,26 @@ class NotificationManager: ObservableObject {
         ]
         
         do {
-            let result = try await functions.httpsCallable("sendIncidentNotification").call(payload)
-            // Ideally result.data would contain info about success/failure counts
-            print("[NotificationManager] Cloud Function sendIncidentNotification called successfully. Attempted to send to \(tokens.count) tokens. Result: \(result.data)")
+            print("[NotificationManager] 🔄 Calling 'sendIncidentNotification'...")
+            let result = try await functions.httpsCallable("sendIncidentNotification").call(payloadDict)
+            print("[NotificationManager] ✅ SUCCESS! Cloud Function returned")
+            print("[NotificationManager] 📊 Result: \(result.data)")
+            
+            if let resultDict = result.data as? [String: Any] {
+                if let successCount = resultDict["successCount"] as? Int {
+                    print("[NotificationManager] 📤 Sent to \(successCount) device(s)")
+                }
+                if let failureCount = resultDict["failureCount"] as? Int, failureCount > 0 {
+                    print("[NotificationManager] ⚠️ Failed: \(failureCount) device(s)")
+                }
+            }
+        } catch let error as NSError {
+            print("[NotificationManager] ❌ Cloud Function ERROR:")
+            print("[NotificationManager]   Code: \(error.code)")
+            print("[NotificationManager]   Domain: \(error.domain)")
+            print("[NotificationManager]   Description: \(error.localizedDescription)")
         } catch {
-            print("[NotificationManager] Error calling Cloud Function sendIncidentNotification: \(error.localizedDescription)")
+            print("[NotificationManager] ❌ Unknown error: \(error.localizedDescription)")
         }
     }
     
