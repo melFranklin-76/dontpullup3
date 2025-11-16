@@ -1,13 +1,13 @@
-// Developer Notes
+## Developer Notes
 
-// Ignored Warnings and Errors
+### Ignored Warnings and Errors
 
-// - Missing `default.csv` Warning:
-//   - The app may log errors or warnings about a missing `default.csv` resource. This file is not required for normal operation, and these warnings can be safely ignored during development and testing.
+- **Missing `default.csv` warning**
+  - Console message: `Failed to locate resource named "default.csv"`.
+  - This file is optional for map styling; ignore this warning during development/testing unless you specifically need the asset.
 
-// - Empty dSYM File Warning:
-//   - Xcode builds may emit warnings such as:
-//     - `empty dSYM file detected, dSYM was created with an executable with no debug info.`
-//   - These warnings are not critical for local development/testing and can be ignored. Ensure debug symbols are enabled for production builds if you need symbolicated crash logs.
+- **Empty dSYM warning**
+  - Console/Xcode message: `empty dSYM file detected, dSYM was created with an executable with no debug info.`
+  - Safe to ignore for debug builds. Enable dSYM generation for archive/release builds if you need symbolicated crash logs.
 
-// No action is required for these specific warnings. They do not affect the core functionality of the app.
+Only the warnings listed above are considered benign. Investigate and fix any other console warnings/errors. Document additional benign warnings here once confirmed so the whole team knows they can be ignored.

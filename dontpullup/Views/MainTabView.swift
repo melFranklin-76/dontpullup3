@@ -132,11 +132,12 @@ struct MapContentView: View {
   @State private var showingProfile = false
   @State private var showingTermsOfService = false
   @State private var showingPrivacyPolicy = false
+  @State private var showingPremium = false
+  @State private var showingZipCodePurchase = false
   private let hapticImpact = UIImpactFeedbackGenerator(style: .medium)
 
   // State for marquee animation
   @State private var marqueeOffset: CGFloat = 0
-  @State private var shouldAnimateMarquee = false
   private let marqueeSpacer = "  "  // Double space at the end
   private let baseMarqueeText = "SHOW US WHO THEY ARE        WE WILL SHOW THEM WHO WE ARE NOT"
   private var marqueeText: String { baseMarqueeText + marqueeSpacer }
@@ -147,6 +148,12 @@ struct MapContentView: View {
 
   private let privacyPolicyPublisher = NotificationCenter.default
     .publisher(for: Notification.Name("OpenPrivacyPolicy"))
+  
+  private let showPremiumPublisher = NotificationCenter.default
+    .publisher(for: Notification.Name("ShowPremiumView"))
+  
+  private let showZipCodePurchasePublisher = NotificationCenter.default
+    .publisher(for: Notification.Name("ShowZipCodePurchase"))
 
   var body: some View {
     GeometryReader { geometry in
@@ -175,51 +182,64 @@ struct MapContentView: View {
               .padding(.horizontal, geometry.size.width * 0.1)
 
             // Marquee sits visually above "ON GRANDMA!" within the ZStack
-            ScrollView(.horizontal, showsIndicators: false) {
-              HStack(spacing: 0) {
-                Text(marqueeText)
-                  .font(
-                    .system(
-                      size: adaptiveFontSize(for: geometry, baseSize: 12, scaleFactor: 0.03),
-                      weight: .medium)
-                  )
-                  .foregroundColor(.black)
-                  .tracking(1.5)
-                  .fixedSize(horizontal: true, vertical: false)
-                Text(marqueeText)
-                  .font(
-                    .system(
-                      size: adaptiveFontSize(for: geometry, baseSize: 12, scaleFactor: 0.03),
-                      weight: .medium)
-                  )
-                  .foregroundColor(.black)
-                  .tracking(1.5)
-                  .fixedSize(horizontal: true, vertical: false)
-              }
-              .offset(x: marqueeOffset)
-            }
-            .disabled(true)
-            .frame(maxWidth: .infinity)  // Takes width for clipping
-            .clipped()
-            .shadow(color: .black.opacity(0.5), radius: 1)
-            // Offset slightly below the vertical center for positioning between banners
-            .offset(y: 5)  // Adjust this offset value as needed
-            .onAppear {
+            GeometryReader { marqueeGeometry in
               let font = UIFont.systemFont(
                 ofSize: adaptiveFontSize(for: geometry, baseSize: 12, scaleFactor: 0.03),
                 weight: .medium)
-              let textWidth =
-                marqueeText.widthOfString(usingFont: font) + (CGFloat(marqueeText.count) * 1.5)
-              marqueeOffset = 0
-              shouldAnimateMarquee = true
-              // Significantly slower animation - reduced speed by another 50% (now 25% of original)
-              withAnimation(
-                .linear(duration: Double(textWidth / 37.5)).repeatForever(autoreverses: false)
-              ) {
-                marqueeOffset = -textWidth
+              let textWidth = marqueeText.widthOfString(usingFont: font)
+              
+              ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 0) {
+                  // Use 3 copies for seamless looping
+                  ForEach(0..<3, id: \.self) { index in
+                    Text(marqueeText)
+                      .font(
+                        .system(
+                          size: adaptiveFontSize(for: geometry, baseSize: 12, scaleFactor: 0.03),
+                          weight: .medium)
+                      )
+                      .foregroundColor(.black)
+                      .tracking(1.5)
+                      .fixedSize(horizontal: true, vertical: false)
+                  }
+                }
+                .offset(x: marqueeOffset)
+              }
+              .disabled(true)
+              .clipped()
+              .task {
+                // Calculate animation duration for smooth scrolling
+                let speed: CGFloat = 50  // pixels per second - adjust this to change speed
+                let duration = Double(textWidth / speed)
+                
+                // Start seamless infinite animation
+                // With 3 copies, when offset reaches -textWidth, copy 2 is at position 0
+                // So resetting to 0 is visually seamless
+                marqueeOffset = 0
+                
+                // Create seamless infinite loop using continuous animation
+                // The reset happens instantly when the next copy is in the exact same position
+                while !Task.isCancelled {
+                  // Animate smoothly to -textWidth
+                  withAnimation(.linear(duration: duration)) {
+                    marqueeOffset = -textWidth
+                  }
+                  
+                  // Wait for animation to complete
+                  try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
+                  
+                  // Reset instantly without animation - this happens when copy 2 is at position 0
+                  // so it's completely invisible to the user
+                  marqueeOffset = 0
+                }
               }
             }
-            .id(shouldAnimateMarquee)
+            .frame(maxWidth: .infinity)
+            .frame(height: 20)  // Fixed height to prevent layout issues
+            .clipped()
+            .shadow(color: .black.opacity(0.5), radius: 1)
+            // Offset slightly below the vertical center for positioning between banners
+            .offset(y: 5)
 
             // ON GRANDMA! Text
             VStack(spacing: 0) {
@@ -284,6 +304,15 @@ struct MapContentView: View {
                     hapticImpact.impactOccurred()
                     mapViewModel.toggleFilter(.emergency)
                   }, isSelected: mapViewModel.selectedFilters.contains(.emergency),
+                  geometry: geometry
+                )
+
+                indicatorButton(
+                  emoji: "🧊",
+                  action: {
+                    hapticImpact.impactOccurred()
+                    mapViewModel.toggleFilter(.ice)
+                  }, isSelected: mapViewModel.selectedFilters.contains(.ice),
                   geometry: geometry
                 )
 
@@ -370,22 +399,28 @@ struct MapContentView: View {
                 showingSettings = true
               }, geometry: geometry)
 
-            // Center on location button
+            // Location tracking toggle button
+            // Shows different icon based on tracking state:
+            // - "location" = not tracking (will center once when tapped)
+            // - "location.fill" = actively tracking user (like navigation)
             toolbarButton(
-              systemName: "location",
+              systemName: mapViewModel.isTrackingUserLocation ? "location.fill" : "location",
               action: {
                 hapticImpact.impactOccurred()
-                // Use the unified location handler for centering
-                mapViewModel.handleLocationAction(.center)
-              }, geometry: geometry)
+                // Toggle between tracking mode and one-time center
+                if mapViewModel.isTrackingUserLocation {
+                  // If already tracking, stop tracking
+                  mapViewModel.toggleLocationTracking()
+                } else {
+                  // If not tracking, start tracking mode (like navigation)
+                  mapViewModel.toggleLocationTracking()
+                }
+              },
+              tint: mapViewModel.isTrackingUserLocation ? .blue : .white,
+              geometry: geometry)
 
             // Map type cycle button - cycles through all map types
-            toolbarButton(
-              systemName: mapViewModel.mapTypeIcon(),
-              action: {
-                hapticImpact.impactOccurred()
-                mapViewModel.cycleMapType()
-              }, geometry: geometry)
+            mapStyleMenu(geometry: geometry, mapViewModel: mapViewModel)
 
             // Edit mode toggle button
             toolbarButton(
@@ -426,6 +461,12 @@ struct MapContentView: View {
     .onReceive(privacyPolicyPublisher) { _ in
       showingPrivacyPolicy = true
     }
+    .onReceive(showPremiumPublisher) { _ in
+      showingPremium = true
+    }
+    .onReceive(showZipCodePurchasePublisher) { _ in
+      showingZipCodePurchase = true
+    }
     .sheet(isPresented: $showingSettings) {
       SettingsView()
         .environmentObject(authState)
@@ -435,6 +476,17 @@ struct MapContentView: View {
     .sheet(isPresented: $showingProfile) {
       ProfileView()
         .environmentObject(authState)
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+    }
+    .sheet(isPresented: $showingPremium) {
+      PremiumView()
+        .environmentObject(authState)
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+    }
+    .sheet(isPresented: $showingZipCodePurchase) {
+      ZipCodePurchaseView()
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
     }
@@ -486,9 +538,8 @@ struct MapContentView: View {
     }
   }
 
-  // Helper function for toolbar buttons (bottom) with adaptive sizing
-  private func toolbarButton(
-    systemName: String, action: @escaping () -> Void, tint: Color = .white, geometry: GeometryProxy
+  private func toolbarButtonLabel(
+    systemName: String, tint: Color, geometry: GeometryProxy
   ) -> some View {
     let isIPad = UIDevice.current.userInterfaceIdiom == .pad
     let iconSize =
@@ -500,13 +551,57 @@ struct MapContentView: View {
       ? adaptiveButtonSize(for: geometry, baseSize: 60, scaleFactor: 0.06)
       : adaptiveButtonSize(for: geometry, baseSize: 44, scaleFactor: 0.07)
 
-    return Button(action: action) {
-      Image(systemName: systemName)
-        .font(.system(size: iconSize))
-        .foregroundColor(tint)
-        .frame(maxWidth: .infinity)
-        .frame(height: buttonHeight)
+    return Image(systemName: systemName)
+      .font(.system(size: iconSize))
+      .foregroundColor(tint)
+      .frame(maxWidth: .infinity)
+      .frame(height: buttonHeight)
+  }
+
+  // Helper function for toolbar buttons (bottom) with adaptive sizing
+  private func toolbarButton(
+    systemName: String, action: @escaping () -> Void, tint: Color = .white, geometry: GeometryProxy
+  ) -> some View {
+    Button(action: action) {
+      toolbarButtonLabel(systemName: systemName, tint: tint, geometry: geometry)
     }
+  }
+
+  @ViewBuilder
+  private func mapStyleMenu(geometry: GeometryProxy, mapViewModel: MapViewModel) -> some View {
+    Menu {
+      ForEach(MapDisplayStyle.allCases) { style in
+        Button {
+          mapViewModel.setMapDisplayStyle(style)
+        } label: {
+          HStack(spacing: 12) {
+            Image(systemName: style.iconName)
+              .foregroundColor(style == mapViewModel.mapDisplayStyle ? .accentColor : .primary)
+
+            VStack(alignment: .leading, spacing: 2) {
+              Text(style.title)
+                .fontWeight(style == mapViewModel.mapDisplayStyle ? .semibold : .regular)
+              Text(style.subtitle)
+                .font(.caption)
+                .foregroundColor(.secondary)
+            }
+
+            if style == mapViewModel.mapDisplayStyle {
+              Spacer()
+              Image(systemName: "checkmark")
+                .foregroundColor(.accentColor)
+            }
+          }
+        }
+      }
+    } label: {
+      toolbarButtonLabel(
+        systemName: mapViewModel.mapTypeIcon(),
+        tint: .white,
+        geometry: geometry
+      )
+    }
+    .frame(maxWidth: .infinity)
   }
 
   // Helper function to calculate adaptive font sizes based on screen size
@@ -569,6 +664,55 @@ extension String {
     let fontAttributes = [NSAttributedString.Key.font: font]
     let size = self.size(withAttributes: fontAttributes)
     return size.width
+  }
+}
+
+// MARK: - Tutorial View Controller
+/// UIKit view controller to present the tutorial overlay
+class TutorialViewController: UIViewController {
+  private var onDismiss: (() -> Void)?
+  
+  init(onDismiss: @escaping () -> Void) {
+    self.onDismiss = onDismiss
+    super.init(nibName: nil, bundle: nil)
+    modalPresentationStyle = .overFullScreen
+    modalTransitionStyle = .crossDissolve
+  }
+  
+  required init?(coder: NSCoder) {
+    fatalError("init(coder:) has not been implemented")
+  }
+  
+  override func viewDidLoad() {
+    super.viewDidLoad()
+    
+    // Create a binding that dismisses the view controller when set to false
+    let binding = Binding<Bool>(
+      get: { true },
+      set: { [weak self] newValue in
+        if !newValue {
+          self?.handleDismiss()
+        }
+      }
+    )
+    
+    // Create the SwiftUI tutorial view with the binding
+    let tutorialView = TutorialOverlayView(isPresented: binding)
+    let hostingController = UIHostingController(rootView: tutorialView)
+    hostingController.view.backgroundColor = .clear
+    
+    // Add as child view controller
+    addChild(hostingController)
+    view.addSubview(hostingController.view)
+    hostingController.view.frame = view.bounds
+    hostingController.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    hostingController.didMove(toParent: self)
+  }
+  
+  @objc private func handleDismiss() {
+    dismiss(animated: true) { [weak self] in
+      self?.onDismiss?()
+    }
   }
 }
 

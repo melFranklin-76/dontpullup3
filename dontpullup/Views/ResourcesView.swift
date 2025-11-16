@@ -4,6 +4,7 @@ struct ResourcesView: View {
   var body: some View {
     NoBounceScrollView {
       VStack(alignment: .leading, spacing: 24) {
+        Spacer().frame(height: 12)
         // Introduction
         Text("Anti-Racism Resources")
           .font(.title.bold())
@@ -131,10 +132,12 @@ struct ResourcesView: View {
             ),
           ])
       }
-      .padding()
+      .padding(.horizontal, 20)
+      .padding(.vertical, 24)
     }
     .navigationTitle("Resources")
     .navigationBarTitleDisplayMode(.inline)
+    .dpuBackground()
   }
 }
 

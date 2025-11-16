@@ -9,6 +9,113 @@ import Photos
 import SwiftUI
 @preconcurrency import UIKit
 
+enum MapDisplayStyle: String, CaseIterable, Identifiable {
+  case explore
+  case muted
+  case satellite
+  case hybrid
+  case flyover
+
+  var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .explore:
+      return "Explore 2D"
+    case .muted:
+      return "Night Mode"
+    case .satellite:
+      return "Satellite"
+    case .hybrid:
+      return "Hybrid Detail"
+    case .flyover:
+      return "Immersive 3D"
+    }
+  }
+
+  var subtitle: String {
+    switch self {
+    case .explore:
+      return "Default streets & landmarks"
+    case .muted:
+      return "Low-glare dark canvas"
+    case .satellite:
+      return "High-resolution imagery"
+    case .hybrid:
+      return "Labels + satellite context"
+    case .flyover:
+      return "Tilted 3D perspective"
+    }
+  }
+
+  var iconName: String {
+    switch self {
+    case .explore:
+      return "map"
+    case .muted:
+      return "moon.stars.fill"
+    case .satellite:
+      return "sparkles.rectangle.stack"
+    case .hybrid:
+      return "globe.americas.fill"
+    case .flyover:
+      return "view.3d"
+    }
+  }
+
+  var mapType: MKMapType {
+    switch self {
+    case .explore:
+      return .standard
+    case .muted:
+      return .mutedStandard
+    case .satellite:
+      return .satellite
+    case .hybrid:
+      return .hybrid
+    case .flyover:
+      return .hybridFlyover
+    }
+  }
+
+  var allowsPitch: Bool {
+    switch self {
+    case .flyover:
+      return true
+    default:
+      return false
+    }
+  }
+
+  var preferredPitch: CGFloat {
+    allowsPitch ? 55 : 0
+  }
+
+  var preferredAltitude: CLLocationDistance {
+    switch self {
+    case .flyover:
+      return 800
+    case .satellite:
+      return 1200
+    default:
+      return 900
+    }
+  }
+
+  var showsBuildings: Bool {
+    switch self {
+    case .satellite:
+      return false
+    default:
+      return true
+    }
+  }
+
+  var showsTraffic: Bool {
+    self == .hybrid
+  }
+}
+
 @MainActor
 class MapViewModel: NSObject, ObservableObject {
   // MARK: - Published Properties
@@ -27,13 +134,20 @@ class MapViewModel: NSObject, ObservableObject {
   @Published var showAlert = false
   @Published var alertMessage = ""
   @Published var isEditMode = false
-  @Published var mapType: MKMapType = .standard
+  @Published var mapType: MKMapType = MapDisplayStyle.explore.mapType
+  @Published var mapDisplayStyle: MapDisplayStyle = .explore {
+    didSet { mapType = mapDisplayStyle.mapType }
+  }
   @Published var mapRegion: MKCoordinateRegion?
   @Published var showingOnlyMyPins = false
-  @Published var pendingCoordinate: CLLocationCoordinate2D?
-  @Published var isRequestingLocation = false
-  @Published var currentlyPlayingVideoId: String?
-  @Published var pendingVideoData: Data?
+  var pendingCoordinate: CLLocationCoordinate2D?
+  var isRequestingLocation = false
+  var currentlyPlayingVideoId: String?
+  var pendingVideoData: Data?
+
+  // Pre-compression for ultra-fast uploads
+  @Published var preCompressedVideoURL: URL?
+  private var preCompressionTask: Task<Void, Error>?
   @Published var uploadProgress: Double = 0
   @Published var reportStep: ReportStep?  // nil = no sheet
   @Published var reportDraft = PinDraft()  // holds coord/type/url
@@ -59,6 +173,11 @@ class MapViewModel: NSObject, ObservableObject {
   // MARK: - Private Properties
   private let locationManager = CLLocationManager()
   private let db = Firestore.firestore()
+  private var lastPresenceZipCode: String?
+  private var lastPresenceLocation: CLLocation?
+  private var lastPresenceUpdateDate: Date?
+  private let presenceUpdateDistanceThreshold: CLLocationDistance = 120  // meters
+  private let presenceUpdateInterval: TimeInterval = 60  // seconds between duplicate writes
   
   // Geographic filtering properties
   private var lastQueriedRegion: MKCoordinateRegion?
@@ -76,16 +195,9 @@ class MapViewModel: NSObject, ObservableObject {
       // Apply incident type filter
       let passesTypeFilter = selectedFilters.isEmpty || selectedFilters.contains(pin.incidentType)
 
-      // Apply zip code restriction for non-premium users
-      if let userProfile = authManager.currentUserProfile, !userProfile.isPremium {
-        // For non-premium users, only show pins in their original zip code
-        let pinInUserZipCode = pin.zipCode == userProfile.originalZipCode
-
-        // Show pins that pass both the type filter and are in user's original zip code
-        return passesTypeFilter && pinInUserZipCode
-      }
-
-      // Premium users see all pins that match their type filters
+      // All users (premium and non-premium) see all pins
+      // Non-premium users are only restricted from watching videos outside their current zip code
+      // This restriction is enforced in the video playback logic, not here
       return passesTypeFilter
     }
   }
@@ -109,7 +221,9 @@ class MapViewModel: NSObject, ObservableObject {
     ]
 
     try await db.collection("flaggedVideos").addDocument(data: report)
+    #if DEBUG
     print("[MapViewModel] Flag report submitted successfully for video \(videoId)")
+    #endif
   }
 
   // MARK: - User Actions
@@ -126,8 +240,7 @@ class MapViewModel: NSObject, ObservableObject {
   }
 
   func toggleMapType() {
-    mapType = mapType == .standard ? .hybrid : .standard
-    mapRegion = mapRegion
+    cycleMapType()
   }
 
   func toggleEditMode() {
@@ -141,7 +254,9 @@ class MapViewModel: NSObject, ObservableObject {
 
   // MARK: - Zoom helpers
   func zoomIn() {
+    #if DEBUG
     print("[MapViewModel] Zoom in requested")
+    #endif
     var newRegion = self.region  // Start with the current actual region
 
     // Sanitize current region to prevent NaN propagation
@@ -166,9 +281,11 @@ class MapViewModel: NSObject, ObservableObject {
 
     newRegion.span = MKCoordinateSpan(latitudeDelta: latDelta, longitudeDelta: lonDelta)
 
+    #if DEBUG
     print(
       "[MapViewModel] Setting zoom region from \(self.region.span.latitudeDelta) to \(newRegion.span.latitudeDelta)"
     )
+    #endif
 
     // Important: Update both properties
     self.region = newRegion
@@ -183,7 +300,9 @@ class MapViewModel: NSObject, ObservableObject {
   }
 
   func zoomOut() {
+    #if DEBUG
     print("[MapViewModel] Zoom out requested")
+    #endif
     var newRegion = self.region  // Start with the current actual region
 
     // Sanitize current region to prevent NaN propagation
@@ -208,9 +327,11 @@ class MapViewModel: NSObject, ObservableObject {
 
     newRegion.span = MKCoordinateSpan(latitudeDelta: latDelta, longitudeDelta: lonDelta)
 
+    #if DEBUG
     print(
       "[MapViewModel] Setting zoom region from \(self.region.span.latitudeDelta) to \(newRegion.span.latitudeDelta)"
     )
+    #endif
 
     // Important: Update both properties
     self.region = newRegion
@@ -235,7 +356,9 @@ class MapViewModel: NSObject, ObservableObject {
     // Sanitize user location coordinate
     let validCoordinate = sanitizeCoordinate(userLocation.coordinate)
 
+    #if DEBUG
     print("[MapViewModel] Centering on user location: \(validCoordinate)")
+    #endif
 
     let newCenteredRegion = MKCoordinateRegion(
       center: validCoordinate,
@@ -260,7 +383,7 @@ class MapViewModel: NSObject, ObservableObject {
     guard isLocationAuthorized else { return false }
 
     // 2. Device-level services need to be enabled.
-    guard await checkLocationServicesEnabled() else { return false }
+    guard await checkLocationServicesEnabledAsync() else { return false }
 
     // 3. If we already have a fix, we're done.
     if userLocation != nil { return true }
@@ -274,22 +397,43 @@ class MapViewModel: NSObject, ObservableObject {
     return location != nil
   }
 
-  /// Toggles continuous location tracking mode
+  /// Toggles continuous location tracking mode (like navigation)
   func toggleLocationTracking() {
     isTrackingUserLocation.toggle()
 
     if isTrackingUserLocation {
-      // Start continuous updates if tracking is enabled
+      #if DEBUG
+      print("[MapViewModel] Starting real-time location tracking (navigation mode)")
+      #endif
+      
+      // Configure location manager for navigation-style tracking
+      locationManager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
+      locationManager.distanceFilter = 5 // Update every 5 meters
+      
+      // Start continuous updates for real-time tracking
       locationManager.startUpdatingLocation()
-      // Also center the map on the user
+      
+      // Also center the map on the user with a good zoom level
       if let location = userLocation {
+        let navigationSpan = MKCoordinateSpan(latitudeDelta: 0.005, longitudeDelta: 0.005)
         mapRegion = MKCoordinateRegion(
           center: location.coordinate,
-          span: MKCoordinateSpan(latitudeDelta: 0.0011, longitudeDelta: 0.0011)
+          span: navigationSpan
         )
+        #if DEBUG
+        print("[MapViewModel] Centered map on user at \(location.coordinate)")
+        #endif
       }
     } else {
-      // Stop continuous updates if tracking is disabled
+      #if DEBUG
+      print("[MapViewModel] Stopping real-time location tracking")
+      #endif
+      
+      // Reset to normal accuracy for battery efficiency
+      locationManager.desiredAccuracy = kCLLocationAccuracyBest
+      locationManager.distanceFilter = kCLDistanceFilterNone
+      
+      // Stop continuous updates to save battery
       locationManager.stopUpdatingLocation()
     }
   }
@@ -398,9 +542,13 @@ class MapViewModel: NSObject, ObservableObject {
   func cacheVideo(from remoteURL: URL, key: String) async throws {
     do {
       let _ = try await URLSession.shared.data(from: remoteURL)
+      #if DEBUG
       print("[MapViewModel] Downloaded video data from \(remoteURL)")
+      #endif
     } catch {
+      #if DEBUG
       print("[MapViewModel] Error caching video: \(error.localizedDescription)")
+      #endif
       throw error
     }
   }
@@ -425,10 +573,62 @@ class MapViewModel: NSObject, ObservableObject {
     showAlert = true
   }
 
+  /// Starts pre-compression of video immediately when selected for ultra-fast uploads
+  func startPreCompression(videoURL: URL) {
+    // Cancel any existing pre-compression
+    preCompressionTask?.cancel()
+    preCompressedVideoURL = nil
+
+    // Start new pre-compression task
+    preCompressionTask = Task {
+      do {
+        #if DEBUG
+        print("[MapViewModel] Starting pre-compression of video...")
+        #endif
+
+        let compressedURL = try await StorageUploader.compressVideo(inputURL: videoURL)
+
+        // Update on main actor
+        await MainActor.run {
+          self.preCompressedVideoURL = compressedURL
+          #if DEBUG
+          print("[MapViewModel] Pre-compression completed successfully")
+          #endif
+        }
+      } catch {
+        #if DEBUG
+        print("[MapViewModel] Pre-compression failed: \(error.localizedDescription)")
+        #endif
+        await MainActor.run {
+          self.preCompressedVideoURL = nil
+        }
+      }
+    }
+  }
+
+  /// Uses pre-compressed video if available, otherwise compresses on demand
+  func getOptimizedVideoURL(originalURL: URL) async throws -> URL {
+    // If we have a pre-compressed version, use it
+    if let preCompressed = preCompressedVideoURL {
+      #if DEBUG
+      print("[MapViewModel] Using pre-compressed video for ultra-fast upload")
+      #endif
+      return preCompressed
+    }
+
+    // Otherwise compress on demand (fallback)
+    #if DEBUG
+    print("[MapViewModel] No pre-compressed video available, compressing now...")
+    #endif
+    return try await StorageUploader.compressVideo(inputURL: originalURL)
+  }
+
   func clearPendingData() {
     // Clear pending state regardless of upload progress if explicitly called
     // This ensures cleanup happens even after timeout errors
+    #if DEBUG
     print("[MapViewModel] Clearing pending operation data")
+    #endif
 
     // Clear all pending state in a single batch update
     pendingCoordinate = nil
@@ -436,6 +636,11 @@ class MapViewModel: NSObject, ObservableObject {
     uploadProgress = 0
     showingIncidentPicker = false
     reportStep = nil
+
+    // Cancel pre-compression and clear cached video
+    preCompressionTask?.cancel()
+    preCompressionTask = nil
+    preCompressedVideoURL = nil
 
     // Also reset active uploads counter if we're clearing everything
     activeUploads = 0
@@ -450,37 +655,39 @@ class MapViewModel: NSObject, ObservableObject {
 
   // MARK: - Location Management
 
-  /// Gets the current authorization status safely off the main thread
-  private func getAuthorizationStatus() async -> CLAuthorizationStatus {
-    // Always run this in a detached task to ensure it's completely off the main thread
-    // and properly isolated from the MainActor constraints
-    return await Task.detached(priority: .userInitiated) { () -> CLAuthorizationStatus in
-      // Create a new instance of CLLocationManager rather than accessing self.locationManager
-      // to ensure we're completely isolated from MainActor constraints
-      return CLLocationManager().authorizationStatus
-    }.value
+  /// Gets the current authorization status on the main actor (required by CoreLocation)
+  private func getAuthorizationStatus() -> CLAuthorizationStatus {
+    return locationManager.authorizationStatus
   }
 
-  /// Checks if location services are enabled safely off the main thread
-  private func checkLocationServicesEnabled() async -> Bool {
-    // Run in a detached task to ensure it's completely off the main thread
-    return await Task.detached(priority: .userInitiated) { () -> Bool in
-      return CLLocationManager.locationServicesEnabled()
-    }.value
+  /// Checks if location services are enabled (async to avoid main thread warnings)
+  private func checkLocationServicesEnabledAsync() async -> Bool {
+    return await withCheckedContinuation { continuation in
+      DispatchQueue.global(qos: .utility).async {
+        let enabled = CLLocationManager.locationServicesEnabled()
+        continuation.resume(returning: enabled)
+      }
+    }
+  }
+
+  private func getAuthorizationStatusAsync() async -> CLAuthorizationStatus {
+    return await MainActor.run { locationManager.authorizationStatus }
   }
 
   private func checkInitialLocationStatus() async {
     // Execute CoreLocation queries away from the main thread first
-    let servicesEnabled = await checkLocationServicesEnabled()
-    let status = await getAuthorizationStatus()
+    let servicesEnabled = await checkLocationServicesEnabledAsync()
+    let status = await getAuthorizationStatusAsync()
 
     // Publish results back on the main actor
     await MainActor.run {
       self.isLocationServicesEnabled = servicesEnabled
       self.isLocationAuthorized = (status == .authorizedWhenInUse || status == .authorizedAlways)
+      #if DEBUG
       print(
         "[MapViewModel] Initial check: Services enabled: \(servicesEnabled), Authorized: \(self.isLocationAuthorized) (Status: \(status.rawValue))"
       )
+      #endif
 
       if !self.isLocationServicesEnabled
         || (!self.isLocationAuthorized && (status == .denied || status == .restricted))
@@ -488,35 +695,47 @@ class MapViewModel: NSObject, ObservableObject {
         self.isLimitedFunctionalityDueToLocationDenial = true
         // We can also set the UserDefaults flag here if appropriate, though a dedicated func might be better
         // UserDefaults.standard.set(true, forKey: "userDeclinedLocationPermissions")
+        #if DEBUG
         print(
           "[MapViewModel] Initial check: Location services/auth not sufficient. Limited functionality mode ON."
         )
+        #endif
       } else if self.isLocationAuthorized {
         self.isLimitedFunctionalityDueToLocationDenial = false
         // UserDefaults.standard.set(false, forKey: "userDeclinedLocationPermissions")
+        #if DEBUG
         print("[MapViewModel] Initial check: Location authorized. Limited functionality mode OFF.")
+        #endif
       } else {
         // If status is .notDetermined, we don't set isLimitedFunctionalityDueToLocationDenial yet.
         // It will be determined after the permission prompt.
+        #if DEBUG
         print(
           "[MapViewModel] Initial check: Location status .notDetermined. Waiting for prompt result."
         )
+        #endif
       }
 
+      #if DEBUG
       print(
         "[MapViewModel] No automatic location requests - waiting for user action (center or pin drop)."
       )
+      #endif
     }
   }
 
   @MainActor
   func forceLocationPermissionCheck() async {
+    #if DEBUG
     print("[MapViewModel] forceLocationPermissionCheck called.")
+    #endif
     // Move this off the main thread
-    self.isLocationServicesEnabled = await checkLocationServicesEnabled()
+    self.isLocationServicesEnabled = await checkLocationServicesEnabledAsync()
 
     if !self.isLocationServicesEnabled {
+      #if DEBUG
       print("[MapViewModel] Location services disabled at device level.")
+      #endif
       self.isLocationAuthorized = false  // Reflect this state
       self.isLimitedFunctionalityDueToLocationDenial = true  // Set the flag
       UserDefaults.standard.set(true, forKey: "userDeclinedLocationPermissions")  // Set user default
@@ -526,22 +745,28 @@ class MapViewModel: NSObject, ObservableObject {
     }
 
     // Get authorization status safely off the main thread
-    let currentStatus = await getAuthorizationStatus()
+    let currentStatus = await getAuthorizationStatusAsync()
 
+    #if DEBUG
     print("[MapViewModel] Current authorization status for force check: \(currentStatus.rawValue)")
+    #endif
     self.isLocationAuthorized =
       (currentStatus == .authorizedWhenInUse || currentStatus == .authorizedAlways)
 
     switch currentStatus {
     case .notDetermined:
+      #if DEBUG
       print("[MapViewModel] Authorization not determined, requesting WhenInUse.")
+      #endif
       isRequestingLocation = true  // Indicate a request is in progress
       // We don't set isLimitedFunctionalityDueToLocationDenial here, wait for delegate.
       locationManager.requestWhenInUseAuthorization()
     case .denied, .restricted:
+      #if DEBUG
       print(
         "[MapViewModel] Authorization denied or restricted. Guiding user to settings may be needed."
       )
+      #endif
       self.isLimitedFunctionalityDueToLocationDenial = true  // Set the flag
       UserDefaults.standard.set(true, forKey: "userDeclinedLocationPermissions")  // Set user default
       alertMessage =
@@ -549,7 +774,9 @@ class MapViewModel: NSObject, ObservableObject {
       showAlert = true
     // isLocationAuthorized is already false or will be set by delegate
     case .authorizedWhenInUse, .authorizedAlways:
+      #if DEBUG
       print("[MapViewModel] Already authorized.")
+      #endif
       self.isLimitedFunctionalityDueToLocationDenial = false  // Clear the flag
       UserDefaults.standard.set(false, forKey: "userDeclinedLocationPermissions")  // Clear user default
       // NO automatic location updates - only request if explicitly needed
@@ -562,23 +789,29 @@ class MapViewModel: NSObject, ObservableObject {
         pendingCoordinate = nil
       }
     @unknown default:
+      #if DEBUG
       print("[MapViewModel] Unknown authorization status: \(currentStatus.rawValue)")
+      #endif
     }
   }
 
   @MainActor
   func requestLocationPermission() {
+    #if DEBUG
     print("[MapViewModel] requestLocationPermission called.")
+    #endif
 
     // Move location services check off the main thread with Task
     Task {
-      let servicesEnabled = await checkLocationServicesEnabled()
+    let servicesEnabled = await checkLocationServicesEnabledAsync()
 
       await MainActor.run {
         self.isLocationServicesEnabled = servicesEnabled
 
         if !servicesEnabled {
+          #if DEBUG
           print("[MapViewModel] Location services are disabled. Cannot request permission.")
+          #endif
           self.isLocationAuthorized = false
           alertMessage = "Location services are disabled. Please enable them in Settings."
           showAlert = true
@@ -587,7 +820,7 @@ class MapViewModel: NSObject, ObservableObject {
 
         // Continue with permission request after verifying services are enabled
         Task {
-          let status = await getAuthorizationStatus()
+          let status = await getAuthorizationStatusAsync()
           await MainActor.run {
             self.handleAuthorizationStatus(status)
           }
@@ -599,13 +832,17 @@ class MapViewModel: NSObject, ObservableObject {
   @MainActor
   private func handleAuthorizationStatus(_ status: CLAuthorizationStatus) {
     if status == .notDetermined {
+      #if DEBUG
       print("[MapViewModel] Status is .notDetermined. Requesting WhenInUse authorization.")
+      #endif
       isRequestingLocation = true
       locationManager.requestWhenInUseAuthorization()
     } else {
+      #if DEBUG
       print(
         "[MapViewModel] Permission already determined (Status: \(status.rawValue)). Handling via forceLocationPermissionCheck or delegate."
       )
+      #endif
       // If already determined, let forceLocationPermissionCheck or delegate handle state
       // Potentially trigger force check if called directly and not .notDetermined
       Task { handleLocationAction(.initialPrompt) }
@@ -623,17 +860,31 @@ class MapViewModel: NSObject, ObservableObject {
       return
     }
 
+    // Validate coordinate is on Earth
+    guard abs(pendingCoordinate.latitude) <= 90 && abs(pendingCoordinate.longitude) <= 180 else {
+      showError("Invalid location coordinates")
+      showingIncidentPicker = false
+      return
+    }
+
     let pinId = UUID().uuidString
-    let newPin = Pin(
-      id: pinId,
-      coordinate: pendingCoordinate,
-      incidentType: incidentType,
-      videoURL: "",
-      userId: currentUserId
-    )
 
     Task {
       do {
+        // Get zip code for the pin location
+        let pinLocation = CLLocation(latitude: pendingCoordinate.latitude, longitude: pendingCoordinate.longitude)
+        let zipCode = await getCurrentLocationZipCode(from: pinLocation) ?? authManager.currentUserProfile?.originalZipCode ?? ""
+        
+        // Create pin with zipCode
+        let newPin = Pin(
+          id: pinId,
+          coordinate: pendingCoordinate,
+          incidentType: incidentType,
+          videoURL: "",
+          userId: currentUserId,
+          zipCode: zipCode
+        )
+        
         let data: [String: Any] = [
           "id": pinId,
           "latitude": pendingCoordinate.latitude,
@@ -643,6 +894,7 @@ class MapViewModel: NSObject, ObservableObject {
           "userId": currentUserId,
           "timestamp": Timestamp(),
           "deviceID": UIDevice.current.identifierForVendor?.uuidString ?? "",
+          "zipCode": zipCode,
         ]
 
         try await db.collection("pins").document(pinId).setData(data)
@@ -657,7 +909,9 @@ class MapViewModel: NSObject, ObservableObject {
           }
         }
       } catch {
+        #if DEBUG
         print("[MapViewModel] Error adding pin: \(error.localizedDescription)")
+        #endif
         await MainActor.run {
           showAlert = true
           alertMessage = "Failed to drop pin: \(error.localizedDescription)"
@@ -674,7 +928,9 @@ class MapViewModel: NSObject, ObservableObject {
         self.pins.removeAll { $0.id == pin.id }
       }
     } catch {
+      #if DEBUG
       print("[MapViewModel] Error deleting pin: \(error.localizedDescription)")
+      #endif
       throw error
     }
   }
@@ -719,9 +975,11 @@ class MapViewModel: NSObject, ObservableObject {
       self, name: .appDidBecomeActiveForLocationCheck, object: nil)
     NotificationCenter.default.removeObserver(
       self, name: Notification.Name("UploadProgressUpdated"), object: nil)
+    #if DEBUG
     print(
       "[MapViewModel] Deinitialized and unsubscribed from notifications."
     )
+    #endif
   }
 
   @objc private func updateUploadProgress(notification: Notification) {
@@ -733,12 +991,16 @@ class MapViewModel: NSObject, ObservableObject {
   }
 
   @objc private func handleAppDidBecomeActive() {
+    #if DEBUG
     print("[MapViewModel] App active - NO automatic location check.")
+    #endif
     // Do nothing automatically - user must explicitly request location
   }
 
   private func loadPins() {
+    #if DEBUG
     print("[MapViewModel] Loading pins from Firestore")
+    #endif
     
     // Check if we need to refresh based on region change
     if let lastRegion = lastQueriedRegion {
@@ -758,7 +1020,9 @@ class MapViewModel: NSObject, ObservableObject {
          lonChange < minimumRegionChangeThreshold &&
          centerLatChange < minimumRegionChangeThreshold &&
          centerLonChange < minimumRegionChangeThreshold {
+        #if DEBUG
         print("[MapViewModel] Skipping pin reload - region change too small")
+        #endif
         return
       }
     }
@@ -775,7 +1039,9 @@ class MapViewModel: NSObject, ObservableObject {
     let lonRadiusKm = (region.span.longitudeDelta / 2.0) * 111.0 * cos(center.latitude * .pi / 180.0)
     let radiusKm = max(latRadiusKm, lonRadiusKm) * 1.5  // Add 50% buffer
     
+    #if DEBUG
     print("[MapViewModel] Loading pins for region centered at \(center.latitude), \(center.longitude) with radius \(radiusKm) km")
+    #endif
     
     Task {
       do {
@@ -787,10 +1053,14 @@ class MapViewModel: NSObject, ObservableObject {
         
         await MainActor.run {
           self.pins = loadedPins
+          #if DEBUG
           print("[MapViewModel] Successfully loaded \(loadedPins.count) pins in region")
+          #endif
         }
       } catch {
+        #if DEBUG
         print("[MapViewModel] Error loading pins: \(error.localizedDescription)")
+        #endif
         await MainActor.run {
           self.showError("Failed to load pins: \(error.localizedDescription)")
         }
@@ -808,10 +1078,14 @@ class MapViewModel: NSObject, ObservableObject {
   @MainActor
   private func fetchCurrentLocation() {
     if isLocationAuthorized {
+      #if DEBUG
       print("[MapViewModel] Fetching current location")
+      #endif
       locationManager.requestLocation()
     } else {
+      #if DEBUG
       print("[MapViewModel] Cannot fetch location: not authorized")
+      #endif
     }
   }
 
@@ -840,11 +1114,13 @@ class MapViewModel: NSObject, ObservableObject {
 
   @objc private func refreshLocationPermissions() {
     Task {
-      let servicesEnabled = await checkLocationServicesEnabled()
+      let servicesEnabled = await checkLocationServicesEnabledAsync()
       await MainActor.run {
         self.isLocationServicesEnabled = servicesEnabled
+        #if DEBUG
         print(
           "[MapViewModel] App returned to foreground, relying on delegate for authorization status")
+        #endif
       }
     }
   }
@@ -852,29 +1128,114 @@ class MapViewModel: NSObject, ObservableObject {
   /// Call from MainTabView.onAppear for one-time first launch prompt.
   @MainActor
   func ensureInitialPermissionPrompt() {
+    #if DEBUG
     print("[MapViewModel] Ensuring initial permission prompt")
+    #endif
     // Perform the check off-thread and then act on the result
     Task {
-      let status = await getAuthorizationStatus()
+          let status = await getAuthorizationStatusAsync()
 
       await MainActor.run {
         switch status {
         case .notDetermined:
+          #if DEBUG
           print("[MapViewModel] Requesting location permission on initial load")
+          #endif
           self.isRequestingLocation = true
           self.locationManager.requestWhenInUseAuthorization()
         default:
+          #if DEBUG
           print(
             "[MapViewModel] Permission already determined: \(status.rawValue). Forcing a refresh check"
           )
+          #endif
           Task { await self.forceLocationPermissionCheck() }
         }
       }
     }
   }
 
+  /// Ultra-fast instant reporting: Create pin immediately, upload video in background
+  func dropPinInstantReport(for incidentType: IncidentType, videoURL: URL? = nil) async throws {
+    #if DEBUG
+    print("[MapViewModel] Starting ultra-fast instant reporting...")
+    #endif
+
+    guard let currentPendingCoordinate = pendingCoordinate,
+          let currentUserId = Auth.auth().currentUser?.uid
+    else {
+      await MainActor.run {
+        showAlert = true
+        alertMessage = "Unable to drop pin. Please try again."
+        showingIncidentPicker = false
+      }
+      throw NSError(domain: "MapViewModel", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing coordinate or user ID"])
+    }
+
+    let pinCoordinate = currentPendingCoordinate
+    let pinId = UUID().uuidString
+
+    #if DEBUG
+    print("[MapViewModel] Instant pin ID: \(pinId) at \(pinCoordinate.latitude), \(pinCoordinate.longitude)")
+    #endif
+
+    // Clear pending state immediately for instant feedback
+    await MainActor.run {
+      self.pendingCoordinate = nil
+      self.showingIncidentPicker = false
+      self.uploadProgress = 0.1  // Show immediate progress
+    }
+
+    // Create instant pin (no video initially)
+    let success = try await StorageUploader.createInstantPin(
+      pinId: pinId,
+      coordinate: pinCoordinate,
+      incidentType: incidentType,
+      localURL: videoURL
+    )
+
+    if success {
+      // Add pin to local map immediately (will be updated when video uploads)
+      await MainActor.run {
+        let newPin = Pin(
+          id: pinId,
+          coordinate: pinCoordinate,
+          incidentType: incidentType,
+          videoURL: "",  // Empty initially
+          userId: currentUserId
+        )
+        self.pins.append(newPin)
+        self.uploadProgress = 1.0  // Instant completion feedback
+
+        // Clear progress after brief success indication
+        Task {
+          try? await Task.sleep(nanoseconds: 500_000_000)  // 0.5 seconds
+          await MainActor.run {
+            self.uploadProgress = 0
+          }
+        }
+      }
+
+      #if DEBUG
+      print("[MapViewModel] Instant pin created successfully - video uploading in background")
+      #endif
+
+      // Send instant notifications
+      let instantPin = Pin(
+        id: pinId,
+        coordinate: pinCoordinate,
+        incidentType: incidentType,
+        videoURL: "",
+        userId: currentUserId
+      )
+      await sendZipCodeNotifications(for: instantPin)
+    }
+  }
+
   func dropPinWithVideo(for incidentType: IncidentType, videoURL: URL) async throws {
+    #if DEBUG
     print("[MapViewModel] Starting video upload process...")
+    #endif
 
     // Check if too many uploads are already in progress
     if activeUploads >= 2 {
@@ -891,7 +1252,9 @@ class MapViewModel: NSObject, ObservableObject {
     guard let currentPendingCoordinate = pendingCoordinate,
       let currentUserId = Auth.auth().currentUser?.uid
     else {
+      #if DEBUG
       print("[MapViewModel] Missing coordinate or user ID")
+      #endif
       await MainActor.run {
         showAlert = true
         alertMessage = "Unable to drop pin. Please try again."
@@ -906,10 +1269,12 @@ class MapViewModel: NSObject, ObservableObject {
     let pinCoordinate = currentPendingCoordinate
     let pinId = UUID().uuidString
 
+    #if DEBUG
     print(
       "[MapViewModel] Uploading video for incident type: \(incidentType.title) at \(pinCoordinate.latitude), \(pinCoordinate.longitude)"
     )
     print("[MapViewModel] Generated pin ID: \(pinId)")
+    #endif
 
     // Increment active uploads counter and clear pending state - DO THIS FIRST
     await MainActor.run {
@@ -931,7 +1296,9 @@ class MapViewModel: NSObject, ObservableObject {
       )
 
       self.pins.append(newPin)
+      #if DEBUG
       print("[MapViewModel] Pin created and displayed on map, starting upload...")
+      #endif
     }
 
     // Perform upload in background task to avoid blocking
@@ -946,7 +1313,9 @@ class MapViewModel: NSObject, ObservableObject {
           let metadata = StorageMetadata()
           metadata.contentType = "video/mp4"
 
+          #if DEBUG
           print("[MapViewModel] Starting upload task...")
+          #endif
 
           // Start the upload task
           let uploadTask = storageRef.putFile(from: videoURL, metadata: metadata)
@@ -975,7 +1344,9 @@ class MapViewModel: NSObject, ObservableObject {
           }
 
           successHandle = uploadTask.observe(.success) { _ in
+            #if DEBUG
             print("[MapViewModel] Upload task completed successfully")
+            #endif
 
             // Clean up observers
             if let progressHandle = progressHandle {
@@ -991,13 +1362,17 @@ class MapViewModel: NSObject, ObservableObject {
               let localContinuation = continuation
 
               if let error = error {
+                #if DEBUG
                 print("[MapViewModel] Failed to get download URL: \(error.localizedDescription)")
+                #endif
                 localContinuation.resume(throwing: error)
                 return
               }
 
               guard let downloadURL = url else {
+                #if DEBUG
                 print("[MapViewModel] Download URL is nil")
+                #endif
                 localContinuation.resume(
                   throwing: NSError(
                     domain: "StorageError", code: -1,
@@ -1005,18 +1380,20 @@ class MapViewModel: NSObject, ObservableObject {
                 return
               }
 
+              #if DEBUG
               print("[MapViewModel] Got download URL: \(downloadURL.absoluteString)")
+              #endif
 
               // Show final progress step
               Task { @MainActor in
                 self.uploadProgress = 0.95
               }
 
-              // Get user's current zip code - SAFELY
-              // We need to access MainActor-isolated property in a MainActor context
+              // Get zip code for the pin location (not user's home zip code)
               Task { @MainActor in
-                // Get zip code on the main actor
-                let userZipCode = self.authManager.currentUserProfile?.zipCode ?? ""
+                // Get zip code for the pin's coordinate location using reverse geocoding
+                let pinLocation = CLLocation(latitude: pinCoordinate.latitude, longitude: pinCoordinate.longitude)
+                let pinZipCode = await self.getCurrentLocationZipCode(from: pinLocation) ?? self.authManager.currentUserProfile?.originalZipCode ?? ""
 
                 // Create pin data
                 let pinData: [String: Any] = [
@@ -1027,7 +1404,7 @@ class MapViewModel: NSObject, ObservableObject {
                   "videoURL": downloadURL.absoluteString,
                   "userId": currentUserId,
                   "timestamp": FieldValue.serverTimestamp(),
-                  "zipCode": userZipCode,  // Add zip code to the pin data
+                  "zipCode": pinZipCode,  // Use pin's location zip code, not user's home zip
                 ]
 
                 // Add pin to Firestore using async/await
@@ -1037,18 +1414,23 @@ class MapViewModel: NSObject, ObservableObject {
                   // Use modern async/await API instead of completion handler
                   try await db.collection("pins").document(pinId).setData(pinData)
                   
+                  #if DEBUG
                   print("[MapViewModel] Successfully saved pin to Firestore")
+                  #endif
 
-                  // Update the existing pin with video URL
+                  // Update the existing pin with video URL and zip code
                   if let index = self.pins.firstIndex(where: { $0.id == pinId }) {
                     self.pins[index] = Pin(
                       id: pinId,
                       coordinate: pinCoordinate,
                       incidentType: incidentType,
                       videoURL: downloadURL.absoluteString,
-                      userId: currentUserId
+                      userId: currentUserId,
+                      zipCode: pinZipCode
                     )
+                    #if DEBUG
                     print("[MapViewModel] Updated pin with video URL")
+                    #endif
                   }
 
                   self.activeUploads = max(0, self.activeUploads - 1)
@@ -1071,15 +1453,18 @@ class MapViewModel: NSObject, ObservableObject {
                       coordinate: pinCoordinate,
                       incidentType: incidentType,
                       videoURL: downloadURL.absoluteString,
-                      userId: currentUserId
+                      userId: currentUserId,
+                      zipCode: pinZipCode
                     ))
 
                   // Resume continuation successfully
                   continuation.resume(returning: ())
                 } catch {
+                  #if DEBUG
                   print(
                     "[MapViewModel] Failed to save pin to Firestore: \(error.localizedDescription)"
                   )
+                  #endif
                   // Remove the pin from local array since Firestore save failed
                   self.pins.removeAll { $0.id == pinId }
                   self.activeUploads = max(0, self.activeUploads - 1)
@@ -1093,7 +1478,9 @@ class MapViewModel: NSObject, ObservableObject {
           }
 
           failureHandle = uploadTask.observe(.failure) { snapshot in
+            #if DEBUG
             print("[MapViewModel] Upload task failed")
+            #endif
 
             // Store the continuation locally to avoid using it in an async context
             let localContinuation = continuation
@@ -1114,10 +1501,14 @@ class MapViewModel: NSObject, ObservableObject {
             }
 
             if let error = snapshot.error as? NSError {
+              #if DEBUG
               print("[MapViewModel] Upload error: \(error.localizedDescription)")
+              #endif
               localContinuation.resume(throwing: error)
             } else {
+              #if DEBUG
               print("[MapViewModel] Unknown upload error")
+              #endif
               localContinuation.resume(
                 throwing: NSError(
                   domain: "StorageError", code: -2,
@@ -1131,11 +1522,15 @@ class MapViewModel: NSObject, ObservableObject {
 
   @MainActor
   func upload(draft: PinDraft) async {
+    #if DEBUG
     print("[MapViewModel] Starting upload process for pin with video: \(draft.videoURL != nil)")
+    #endif
 
     // Check if user is anonymous AND trying to upload a video
     if authState.isAnonymous && draft.videoURL != nil {
+      #if DEBUG
       print("[MapViewModel] Anonymous user attempted video upload - blocking")
+      #endif
       showError("Guests cannot upload videos.")
       reportStep = nil  // Dismiss the report sheet
       return
@@ -1143,52 +1538,84 @@ class MapViewModel: NSObject, ObservableObject {
 
     do {
       let pinId = UUID().uuidString
+      #if DEBUG
       print("[MapViewModel] Generated pin ID: \(pinId)")
+      #endif
 
       // Check if video file exists before attempting upload
       if let videoURL = draft.videoURL {
         if !FileManager.default.fileExists(atPath: videoURL.path) {
+          #if DEBUG
           print("[MapViewModel] ERROR: Video file does not exist at path: \(videoURL.path)")
+          #endif
           showError(
             "Selected video file is no longer available. Please try selecting another video.")
           return
         }
+        #if DEBUG
         print("[MapViewModel] Video file exists at: \(videoURL.path)")
+        #endif
       } else {
+        #if DEBUG
         print("[MapViewModel] No video attached - creating pin without video")
+        #endif
       }
 
       // Upload video if present
+      #if DEBUG
       print("[MapViewModel] Calling StorageUploader.uploadIfNeeded...")
+      #endif
       let remoteURL = try await StorageUploader.uploadIfNeeded(
         pinId: pinId, localURL: draft.videoURL)
+      #if DEBUG
       print("[MapViewModel] StorageUploader completed. Remote URL: '\(remoteURL)'")
+      #endif
 
       // Save pin to Firestore FIRST
+      #if DEBUG
       print("[MapViewModel] Saving pin to Firestore...")
+      #endif
+      
+      // Get zip code for the pin location
+      let pinLocation = CLLocation(latitude: draft.coordinate.latitude, longitude: draft.coordinate.longitude)
+      let zipCode = await getCurrentLocationZipCode(from: pinLocation) ?? authManager.currentUserProfile?.originalZipCode ?? ""
+      
       try await FirestorePins.addPin(
         id: pinId,
         coord: draft.coordinate,
         type: draft.incidentType,
-        videoURL: remoteURL)
+        videoURL: remoteURL,
+        zipCode: zipCode)
+      #if DEBUG
       print("[MapViewModel] Pin saved to Firestore successfully")
+      #endif
 
       // Let the Firestore listener handle adding the pin to the local array
       // This prevents race conditions where the listener overwrites our local update
+      #if DEBUG
       print("[MapViewModel] Waiting for Firestore listener to add pin to local array")
+      #endif
 
       // Send notifications
       let newPin = draft.makePin(id: pinId, remote: remoteURL)
       await sendZipCodeNotifications(for: newPin)
 
       reportStep = nil  // Close sheet
+      #if DEBUG
       print("[MapViewModel] Upload process completed successfully")
+      #endif
 
     } catch {
+      #if DEBUG
       print("[MapViewModel] Upload failed with error: \(error)")
+      #endif
       if let nsError = error as NSError? {
+        #if DEBUG
         print("[MapViewModel] Error domain: \(nsError.domain), code: \(nsError.code)")
+        #endif
+        #if DEBUG
         print("[MapViewModel] Error userInfo: \(nsError.userInfo)")
+        #endif
       }
       showError("Failed to create pin: \(error.localizedDescription)")
     }
@@ -1251,7 +1678,9 @@ class MapViewModel: NSObject, ObservableObject {
       spanDelta = 0.002  // Fallback to reasonable zoom (larger than tight zoom)
     }
 
+    #if DEBUG
     print("[MapViewModel] Centering on user location with 500ft radius: \(validCoordinate)")
+    #endif
 
     // Set region with 500-foot zoom focused on user
     let newCenterRegion = MKCoordinateRegion(
@@ -1264,34 +1693,18 @@ class MapViewModel: NSObject, ObservableObject {
 
   // Cycle through multiple map types instead of just two
   func cycleMapType() {
-    switch mapType {
-    case .standard:
-      mapType = .hybrid
-    case .hybrid:
-      mapType = .satellite
-    case .satellite:
-      mapType = .mutedStandard
-    case .mutedStandard:
-      mapType = .standard
-    default:
-      mapType = .standard
-    }
+    guard let currentIndex = MapDisplayStyle.allCases.firstIndex(of: mapDisplayStyle) else { return }
+    let nextIndex = (currentIndex + 1) % MapDisplayStyle.allCases.count
+    setMapDisplayStyle(MapDisplayStyle.allCases[nextIndex])
+  }
+
+  func setMapDisplayStyle(_ style: MapDisplayStyle) {
+    mapDisplayStyle = style
   }
 
   // Helper to get icon name for current map type
   func mapTypeIcon() -> String {
-    switch mapType {
-    case .standard:
-      return "map"
-    case .hybrid:
-      return "globe.americas.fill"
-    case .satellite:
-      return "camera.aperture"
-    case .mutedStandard:
-      return "map.fill"
-    default:
-      return "map"
-    }
+    mapDisplayStyle.iconName
   }
 
   /// Checks if a given coordinate is within 200 feet of the user's current location
@@ -1346,11 +1759,10 @@ class MapViewModel: NSObject, ObservableObject {
   }
 
   // Unified location request handler
-  @MainActor
   func handleLocationAction(_ action: LocationAction) {
     Task {
-      let servicesEnabled = await checkLocationServicesEnabled()
-      let status = await getAuthorizationStatus()
+      let servicesEnabled = await checkLocationServicesEnabledAsync()
+      let status = await getAuthorizationStatusAsync()
       await MainActor.run {
         if !servicesEnabled {
           self.alertMessage = "Location services are disabled. Please enable them in Settings."
@@ -1392,11 +1804,15 @@ class MapViewModel: NSObject, ObservableObject {
   // Helper function to clean up invalid pin documents
   @MainActor
   func cleanupInvalidPins() async {
+    #if DEBUG
     print("[MapViewModel] Starting cleanup of invalid pins...")
+    #endif
     
     // Only clean up pins belonging to the current user
     guard let currentUserId = Auth.auth().currentUser?.uid else {
+      #if DEBUG
       print("[MapViewModel] No current user, skipping cleanup")
+      #endif
       return
     }
     
@@ -1405,7 +1821,9 @@ class MapViewModel: NSObject, ObservableObject {
       .getDocuments()
 
     guard let documents = snapshot?.documents else {
+      #if DEBUG
       print("[MapViewModel] No documents found for cleanup")
+      #endif
       return
     }
 
@@ -1419,13 +1837,17 @@ class MapViewModel: NSObject, ObservableObject {
         && data["type"] != nil && data["userId"] != nil
 
       if !hasRequiredFields {
+        #if DEBUG
         print("[MapViewModel] Removing invalid pin document: \(document.documentID)")
+        #endif
         try? await document.reference.delete()
         removedCount += 1
       }
     }
 
+    #if DEBUG
     print("[MapViewModel] Cleanup completed. Removed \(removedCount) invalid pins")
+    #endif
     if removedCount > 0 {
       // Refresh pins after cleanup
       loadPins()
@@ -1435,15 +1857,27 @@ class MapViewModel: NSObject, ObservableObject {
   // MARK: - Notification Handling
   private func sendZipCodeNotifications(for pin: Pin) async {
     guard let currentUserProfile = authManager.currentUserProfile else {
+      #if DEBUG
       print("[MapViewModel] Cannot send notifications - no current user profile")
+      #endif
       return
     }
 
-    let zipCode = currentUserProfile.zipCode
-    print("[MapViewModel] Sending notifications to users in zip code: \(zipCode)")
+    let notificationZip = pin.zipCode.isEmpty ? currentUserProfile.zipCode : pin.zipCode
+    
+    guard !notificationZip.isEmpty else {
+      #if DEBUG
+      print("[MapViewModel] Cannot send notifications - pin zip code missing")
+      #endif
+      return
+    }
+    
+    #if DEBUG
+    print("[MapViewModel] Sending notifications to users in zip code: \(notificationZip)")
+    #endif
 
     // Send notifications to other users in the same zip code
-    await notificationManager.notifyUsersInZipCode(for: pin, zipCode: zipCode)
+    await notificationManager.notifyUsersInZipCode(for: pin, zipCode: notificationZip)
   }
 
   // Helper function to validate and sanitize coordinate values
@@ -1513,11 +1947,15 @@ class MapViewModel: NSObject, ObservableObject {
       Task {
         do {
           try await FirestorePins.updatePinVideoURL(pinId: pinId, videoURL: newURL)
+          #if DEBUG
           print("[MapViewModel] Successfully updated pin \(pinId) with video URL: \(newURL)")
+          #endif
         } catch {
+          #if DEBUG
           print(
             "[MapViewModel] Error updating pin video URL in Firestore: \(error.localizedDescription)"
           )
+          #endif
         }
       }
     }
@@ -1542,6 +1980,80 @@ class MapViewModel: NSObject, ObservableObject {
     let feet = assetLocation.distance(from: pinLocation) * 3.28084
     return hours <= 5 && feet <= 200
   }
+  
+  // MARK: - Premium Video Access Check
+  
+  /// Checks if the current user can watch a video for a given pin
+  /// Returns (canWatch: Bool, shouldPromptPremium: Bool, message: String?)
+  @MainActor
+  func canWatchVideo(for pin: Pin) async -> (canWatch: Bool, shouldPromptPremium: Bool, message: String?) {
+    // Get current user profile
+    guard let userProfile = authManager.currentUserProfile else {
+      return (false, false, "Please sign in to watch videos")
+    }
+    
+    // Premium users can watch all videos
+    if userProfile.isPremium {
+      return (true, false, nil)
+    }
+    
+    // For non-premium users, get the current device location's zip code
+    guard let currentLocation = userLocation else {
+      return (false, false, "Location needed to verify video access")
+    }
+    
+    // Use reverse geocoding to get current zip code
+    let currentZipCode = await getCurrentLocationZipCode(from: currentLocation)
+    
+    #if DEBUG
+    print("[MapViewModel] Video access check - User's home zip: \(userProfile.originalZipCode), Current location zip: \(currentZipCode ?? "unknown"), Pin zip: \(pin.zipCode)")
+    #endif
+    
+    // Non-premium users can watch videos if:
+    // 1. Pin is in their home/original zip code, OR
+    // 2. Pin is in a purchased zip code, OR
+    // 3. Pin is in their current location's zip code (if available)
+    
+    // Check home zip code
+    if pin.zipCode == userProfile.originalZipCode {
+      return (true, false, nil)
+    }
+    
+    // Check purchased zip codes
+    if userProfile.purchasedZipCodes.contains(pin.zipCode) {
+      return (true, false, nil)
+    }
+    
+    // Check current location zip code
+    if let currentZip = currentZipCode, pin.zipCode == currentZip {
+      return (true, false, nil)
+    }
+    
+    // Pin is outside allowed zip codes - offer to purchase this specific zip or upgrade to premium
+    return (false, true, "This video is in zip code \(pin.zipCode). Unlock this area or upgrade to Premium for unlimited access.")
+  }
+  
+  /// Gets the zip code for a given location using reverse geocoding
+  private func getCurrentLocationZipCode(from location: CLLocation) async -> String? {
+    return await withCheckedContinuation { continuation in
+      let geocoder = CLGeocoder()
+      geocoder.reverseGeocodeLocation(location) { placemarks, error in
+        if let error = error {
+          #if DEBUG
+          print("[MapViewModel] Reverse geocoding error: \(error.localizedDescription)")
+          #endif
+          continuation.resume(returning: nil)
+          return
+        }
+        
+        let zipCode = placemarks?.first?.postalCode
+        #if DEBUG
+        print("[MapViewModel] Reverse geocoded zip code: \(zipCode ?? "nil")")
+        #endif
+        continuation.resume(returning: zipCode)
+      }
+    }
+  }
 }
 
 // MARK: - CLLocationManagerDelegate
@@ -1555,10 +2067,12 @@ extension MapViewModel: CLLocationManagerDelegate {
     // Process the status on the MainActor where UI updates happen
     Task {
       // Get location services enabled state off the main thread
-      let servicesEnabled = await self.checkLocationServicesEnabled()
+      let servicesEnabled = await self.checkLocationServicesEnabledAsync()
 
       await MainActor.run {
+        #if DEBUG
         print("[MapViewModel] Delegate: Authorization status changed to: \(status.rawValue)")
+        #endif
         self.isLocationServicesEnabled = servicesEnabled
         self.isLocationAuthorized = (status == .authorizedWhenInUse || status == .authorizedAlways)
         self.isRequestingLocation = false  // No longer actively requesting permission itself
@@ -1571,7 +2085,9 @@ extension MapViewModel: CLLocationManagerDelegate {
 
         switch status {
         case .authorizedWhenInUse, .authorizedAlways:
+          #if DEBUG
           print("[MapViewModel] Delegate: Authorized.")
+          #endif
           self.isLimitedFunctionalityDueToLocationDenial = false  // Clear the flag
           UserDefaults.standard.set(false, forKey: "userDeclinedLocationPermissions")  // Clear user default
           // NEVER automatically get location - wait for explicit requests
@@ -1584,7 +2100,9 @@ extension MapViewModel: CLLocationManagerDelegate {
             self.pendingCoordinate = nil
           }
         case .denied, .restricted:
+          #if DEBUG
           print("[MapViewModel] Delegate: Denied or restricted.")
+          #endif
           self.alertMessage =
             "Location access is required for core features. Please enable it in Settings."
           self.showAlert = true
@@ -1593,11 +2111,15 @@ extension MapViewModel: CLLocationManagerDelegate {
           self.isLimitedFunctionalityDueToLocationDenial = true  // Set the flag
           UserDefaults.standard.set(true, forKey: "userDeclinedLocationPermissions")  // Set user default
         case .notDetermined:
+          #if DEBUG
           print(
             "[MapViewModel] Delegate: Status became .notDetermined. This shouldn't usually happen after an initial request."
           )
+          #endif
         @unknown default:
+          #if DEBUG
           print("[MapViewModel] Delegate: Unknown authorization status: \(status.rawValue)")
+          #endif
         }
 
         // If we're not in live-tracking mode, stop updates after we get a fix
@@ -1618,7 +2140,9 @@ extension MapViewModel: CLLocationManagerDelegate {
 
       // Update userLocation
       self.userLocation = location
+      #if DEBUG
       print("[MapViewModel] Delegate: Location updated: \(location.coordinate)")
+      #endif
 
       // Break down complex conditions into separate variables
       let isLatitudeNYC = self.region.center.latitude == 40.7128
@@ -1634,9 +2158,11 @@ extension MapViewModel: CLLocationManagerDelegate {
         isFirstLocationFix || isMapAtDefaultNYC || isMapAtDefaultEquator
 
       if shouldUpdateRegionToUserLocation {
+        #if DEBUG
         print(
           "[MapViewModel] First location fix or map is at a default. Centering on user: \(location.coordinate)"
         )
+        #endif
         // Use a span consistent with other user-centric views, e.g., from centerOnUserLocation or a sensible default.
         // For this example, using a span similar to the initial MapView span.
         let defaultUserSpan = MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)  // A reasonable zoom level for user location
@@ -1646,9 +2172,27 @@ extension MapViewModel: CLLocationManagerDelegate {
         )
         self.region = newRegion  // Update the ViewModel's main region state
         self.mapRegion = newRegion  // Signal the MapView to update
+        #if DEBUG
         print(
           "[MapViewModel] Set initial map region to user location: \(newRegion.center), span: \(newRegion.span.latitudeDelta)"
         )
+        #endif
+      }
+
+      // If in tracking mode, update the region to follow the user in real-time
+      // This ensures the map smoothly follows the user like a navigation app
+      if self.isTrackingUserLocation {
+        #if DEBUG
+        print("[MapViewModel] Tracking mode active - updating map to follow user")
+        #endif
+        // Keep the current zoom level (span) but update the center to follow the user
+        let trackingRegion = MKCoordinateRegion(
+          center: location.coordinate,
+          span: self.region.span
+        )
+        self.region = trackingRegion
+        // Note: We don't set mapRegion here because the MapView's userTrackingMode
+        // will handle the smooth following animation automatically
       }
 
       // Center map if explicitly requested after authorization
@@ -1670,7 +2214,55 @@ extension MapViewModel: CLLocationManagerDelegate {
 
       if shouldNotify {
         NotificationCenter.default.post(name: Notification.Name("LocationUpdated"), object: nil)
+        #if DEBUG
         print("[MapViewModel] Posted LocationUpdated notification")
+        #endif
+      }
+      
+      self.updatePresenceIfNeeded(with: location)
+    }
+  }
+
+  private func updatePresenceIfNeeded(with location: CLLocation) {
+    guard let userId = Auth.auth().currentUser?.uid else { return }
+    
+    if let lastLocation = lastPresenceLocation,
+      location.distance(from: lastLocation) < presenceUpdateDistanceThreshold,
+      let lastDate = lastPresenceUpdateDate,
+      Date().timeIntervalSince(lastDate) < presenceUpdateInterval
+    {
+      return
+    }
+    
+    Task {
+      guard let zip = await getCurrentLocationZipCode(from: location), !zip.isEmpty else { return }
+      
+      if zip == lastPresenceZipCode,
+        let lastDate = lastPresenceUpdateDate,
+        Date().timeIntervalSince(lastDate) < 300
+      {
+        lastPresenceLocation = location
+        return
+      }
+      
+      lastPresenceZipCode = zip
+      lastPresenceLocation = location
+      lastPresenceUpdateDate = Date()
+      
+      do {
+        try await db.collection("users").document(userId).updateData([
+          "currentZipCode": zip,
+          "currentZipUpdatedAt": Timestamp(date: Date())
+        ])
+        
+        if var profile = authManager.currentUserProfile {
+          profile.updateCurrentZip(zip)
+          authManager.currentUserProfile = profile
+        }
+      } catch {
+        #if DEBUG
+        print("[MapViewModel] Error updating presence zip: \(error.localizedDescription)")
+        #endif
       }
     }
   }
@@ -1678,7 +2270,9 @@ extension MapViewModel: CLLocationManagerDelegate {
   nonisolated
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error)
   {
+    #if DEBUG
     print("[MapViewModel] Delegate: Failed to get location: \(error.localizedDescription)")
+    #endif
     Task { @MainActor in
       self.isRequestingLocation = false
       self.shouldCenterAfterLocationUpdate = false  // Clear the flag on error

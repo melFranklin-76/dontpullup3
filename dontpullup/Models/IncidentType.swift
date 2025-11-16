@@ -5,12 +5,14 @@ public enum IncidentType: String, CaseIterable, Codable, Sendable {
     case verbal = "Verbal"
     case physical = "Physical"
     case emergency = "Emergency"
+    case ice = "ICE"
     
     public var emoji: String {
         switch self {
         case .verbal: return "🗣️"
         case .physical: return "👊"
         case .emergency: return "🚨"
+        case .ice: return "🧊"
         }
     }
     
@@ -19,6 +21,7 @@ public enum IncidentType: String, CaseIterable, Codable, Sendable {
         case .verbal: return "Verbal Incident"
         case .physical: return "Physical Incident"
         case .emergency: return "Emergency"
+        case .ice: return "ICE Agents"
         }
     }
     
@@ -27,6 +30,7 @@ public enum IncidentType: String, CaseIterable, Codable, Sendable {
         case .verbal: return "Verbal"
         case .physical: return "Physical"
         case .emergency: return "911"
+        case .ice: return "ICE"
         }
     }
     
@@ -35,6 +39,7 @@ public enum IncidentType: String, CaseIterable, Codable, Sendable {
         case .verbal: return "Report verbal harassment or threats"
         case .physical: return "Report physical altercations"
         case .emergency: return "Report life-threatening situations"
+        case .ice: return "Report ICE agent presence"
         }
     }
     
@@ -43,6 +48,7 @@ public enum IncidentType: String, CaseIterable, Codable, Sendable {
         case .verbal: return .yellow
         case .physical: return .orange
         case .emergency: return .red
+        case .ice: return .cyan
         }
     }
     
@@ -53,6 +59,7 @@ public enum IncidentType: String, CaseIterable, Codable, Sendable {
         case "Verbal", "verbal": self = .verbal
         case "Physical", "physical": self = .physical
         case "911", "emergency": self = .emergency
+        case "ICE", "ice": self = .ice
         default:
             throw DecodingError.dataCorruptedError(in: container, debugDescription: "Invalid incident type: \(rawValue)")
         }
@@ -68,6 +75,7 @@ public enum IncidentType: String, CaseIterable, Codable, Sendable {
         case "Verbal": return .verbal
         case "Physical": return .physical
         case "911": return .emergency
+        case "ICE": return .ice
         default: return .verbal
         }
     }

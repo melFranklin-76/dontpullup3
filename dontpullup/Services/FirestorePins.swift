@@ -15,9 +15,10 @@ enum FirestorePins {
   ///   - coord: The coordinates of the pin
   ///   - type: The incident type
   ///   - videoURL: The remote video URL (if any)
+  ///   - zipCode: The zip code for the pin location
   /// - Throws: Error if the operation fails
   static func addPin(
-    id: String, coord: CLLocationCoordinate2D, type: IncidentType, videoURL: String
+    id: String, coord: CLLocationCoordinate2D, type: IncidentType, videoURL: String, zipCode: String = ""
   ) async throws {
     // Accessing Auth and UIDevice is MainActor-isolated in recent SDKs, so grab
     // those values explicitly on the main thread to avoid the
@@ -37,6 +38,7 @@ enum FirestorePins {
       "userId": uid,
       "timestamp": Timestamp(),
       "deviceID": deviceID,
+      "zipCode": zipCode,
     ]
 
     try await db.collection("pins").document(id).setData(data)

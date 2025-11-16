@@ -11,6 +11,7 @@ final class AuthenticationManager: ObservableObject {
   @Published var errorMessage: String?
 
   static let shared = AuthenticationManager()
+  private let pendingFCMTokenKey = "PendingFCMTokenKey"
   private var handle: AuthStateDidChangeListenerHandle?
   private let db = Firestore.firestore()
 
@@ -28,11 +29,15 @@ final class AuthenticationManager: ObservableObject {
         // Load user profile if user exists
         if let user = user {
           await self?.loadUserProfile(userId: user.uid)
+          await self?.syncPendingFCMTokenIfNeeded()
+          await self?.refreshCurrentFCMToken()
         } else {
           self?.currentUserProfile = nil
         }
 
+        #if DEBUG
         print("AuthenticationManager: Auth state changed - User: \(user?.uid ?? "none")")
+        #endif
       }
     }
   }
@@ -45,8 +50,12 @@ final class AuthenticationManager: ObservableObject {
 
     // Load user profile
     await loadUserProfile(userId: result.user.uid)
+    await syncPendingFCMTokenIfNeeded()
+    await refreshCurrentFCMToken()
 
+    #if DEBUG
     print("AuthenticationManager: Sign in successful - User: \(result.user.uid)")
+    #endif
   }
 
   func signUp(email: String, password: String, zipCode: String) async throws {
@@ -54,10 +63,14 @@ final class AuthenticationManager: ObservableObject {
     self.currentUser = result.user
     self.isAuthenticated = true
     self.errorMessage = nil
+    #if DEBUG
     print("AuthenticationManager: Sign up successful - User: \(result.user.uid)")
+    #endif
 
     // Create user profile in Firestore with zip code
     try await createUserProfile(for: result.user, email: email, zipCode: zipCode)
+    await syncPendingFCMTokenIfNeeded()
+    await refreshCurrentFCMToken()
   }
 
   // Legacy signUp method for backward compatibility - will prompt for zip code
@@ -73,10 +86,14 @@ final class AuthenticationManager: ObservableObject {
     self.currentUser = result.user
     self.isAuthenticated = true
     self.errorMessage = nil
+    #if DEBUG
     print("AuthenticationManager: Anonymous sign in successful - User: \(result.user.uid)")
+    #endif
 
     // Create anonymous user profile (no email or zip code)
     try await createAnonymousUserProfile(for: result.user)
+    await syncPendingFCMTokenIfNeeded()
+    await refreshCurrentFCMToken()
   }
 
   private func createAnonymousUserProfile(for user: User) async throws {
@@ -92,7 +109,9 @@ final class AuthenticationManager: ObservableObject {
     ]
 
     try await userRef.setData(userData, merge: true)
+    #if DEBUG
     print("AuthenticationManager: Anonymous user profile created in Firestore - User: \(user.uid)")
+    #endif
   }
 
   func signOut() throws {
@@ -100,7 +119,9 @@ final class AuthenticationManager: ObservableObject {
     self.currentUser = nil
     self.isAuthenticated = false
     self.errorMessage = nil
+    #if DEBUG
     print("AuthenticationManager: Sign out successful")
+    #endif
   }
 
   private func createUserProfile(for user: User, email: String, zipCode: String) async throws {
@@ -140,25 +161,35 @@ final class AuthenticationManager: ObservableObject {
 
           // FIXED: Update FCM token if missing in the loaded profile
           if profile.fcmToken == nil || profile.fcmToken?.isEmpty == true {
+            #if DEBUG
             print("AuthenticationManager: FCM token missing, requesting update from AppDelegate")
+            #endif
             // Request current token from Messaging
             Task {
               if let token = Messaging.messaging().fcmToken {
+                #if DEBUG
                 print("AuthenticationManager: Retrieved current FCM token, updating profile")
+                #endif
                 await updateFCMToken(token)
               }
             }
           }
         } else {
+          #if DEBUG
           print("AuthenticationManager: Failed to parse user profile data")
+          #endif
         }
       } else {
+        #if DEBUG
         print("AuthenticationManager: User profile document not found")
+        #endif
         // For existing users without profiles, create one with a default zip code
         await createMissingUserProfile(userId: userId)
       }
     } catch {
+      #if DEBUG
       print("AuthenticationManager: Error loading user profile: \(error.localizedDescription)")
+      #endif
     }
   }
 
@@ -170,7 +201,9 @@ final class AuthenticationManager: ObservableObject {
     let defaultZipCode = "10001"  // Default to NYC zip code
     let email = user.email ?? ""
 
+    #if DEBUG
     print("AuthenticationManager: Creating missing profile for existing user: \(userId)")
+    #endif
 
     do {
       // FIXED: Get current FCM token to include in the new profile
@@ -200,39 +233,83 @@ final class AuthenticationManager: ObservableObject {
       try? await zipBucketRef.setData(userInfo, merge: true)
 
     } catch {
+      #if DEBUG
       print("AuthenticationManager: Error creating missing profile: \(error.localizedDescription)")
+      #endif
     }
   }
 
   func updateFCMToken(_ token: String) async {
     guard let userId = currentUser?.uid else {
-      print("AuthenticationManager: Cannot update FCM token - no current user")
+      UserDefaults.standard.set(token, forKey: pendingFCMTokenKey)
+      #if DEBUG
+      print("AuthenticationManager: Stored pending FCM token for future update")
+      #endif
       return
     }
 
     do {
+      #if DEBUG
       print("AuthenticationManager: Updating FCM token to: \(token.prefix(8))...")
+      #endif
 
       // Update FCM token in Firestore
       try await db.collection("users").document(userId).updateData(["fcmToken": token])
+      UserDefaults.standard.removeObject(forKey: pendingFCMTokenKey)
 
       // Update local profile
       if currentUserProfile != nil {
         currentUserProfile?.updateFCMToken(token)
       } else {
+        #if DEBUG
         print("AuthenticationManager: Creating profile since none exists during FCM update")
+        #endif
         await loadUserProfile(userId: userId)
       }
 
+      #if DEBUG
       print("AuthenticationManager: FCM token updated for user: \(userId)")
+      #endif
     } catch {
+      #if DEBUG
       print("AuthenticationManager: Error updating FCM token: \(error.localizedDescription)")
+      #endif
 
       // If the document doesn't exist, create it
       if let nsError = error as NSError?, nsError.domain == FirestoreErrorDomain, nsError.code == 5
       {
+        #if DEBUG
         print("AuthenticationManager: User document doesn't exist, creating it")
+        #endif
         await createMissingUserProfile(userId: userId)
+      }
+    }
+  }
+
+  private func syncPendingFCMTokenIfNeeded() async {
+    guard let pendingToken = UserDefaults.standard.string(forKey: pendingFCMTokenKey) else { return }
+    #if DEBUG
+    print("AuthenticationManager: Applying pending FCM token")
+    #endif
+    await updateFCMToken(pendingToken)
+  }
+
+  private func refreshCurrentFCMToken() async {
+    guard let freshToken = await fetchCurrentFCMToken() else { return }
+    await updateFCMToken(freshToken)
+  }
+
+  private func fetchCurrentFCMToken() async -> String? {
+    await withCheckedContinuation { continuation in
+      Messaging.messaging().token { token, error in
+        if let error = error {
+          #if DEBUG
+          print("AuthenticationManager: Failed to fetch FCM token: \(error.localizedDescription)")
+          #endif
+          continuation.resume(returning: nil)
+          return
+        }
+        continuation.resume(returning: token)
       }
     }
   }
@@ -254,11 +331,24 @@ final class AuthenticationManager: ObservableObject {
     }
 
     // Check if user can change to this zip code
+    #if DEBUG
+    print("AuthenticationManager: Checking if user can change to zip code \(newZipCode)")
+    print("AuthenticationManager: User isPremium: \(profile.isPremium)")
+    print("AuthenticationManager: User originalZipCode: \(profile.originalZipCode)")
+    #endif
+
     if !profile.canChangeToZipCode(newZipCode) {
+      #if DEBUG
+      print("AuthenticationManager: canChangeToZipCode returned false - denying zip code change")
+      #endif
       throw NSError(
         domain: "AuthenticationManager", code: -3,
         userInfo: [NSLocalizedDescriptionKey: "Premium upgrade required to change zip codes"])
     }
+
+    #if DEBUG
+    print("AuthenticationManager: canChangeToZipCode returned true - proceeding with zip code change")
+    #endif
 
     do {
       // Update zip code in Firestore
@@ -273,11 +363,16 @@ final class AuthenticationManager: ObservableObject {
         createdAt: profile.createdAt,
         lastActive: Date(),
         isPremium: profile.isPremium,
-        originalZipCode: profile.originalZipCode
+        originalZipCode: profile.originalZipCode,
+        purchasedZipCodes: profile.purchasedZipCodes,
+        currentZipCode: profile.currentZipCode ?? newZipCode,
+        currentZipUpdatedAt: profile.currentZipUpdatedAt
       )
       self.currentUserProfile = updatedProfile
 
+      #if DEBUG
       print("AuthenticationManager: Zip code updated to: \(newZipCode)")
+      #endif
 
       // Ensure user is added to their zip code bucket for notifications (scalable buckets)
       let zipBucketRef = Firestore.firestore().collection("zipcodes").document(newZipCode).collection("users").document(userId)
@@ -289,7 +384,9 @@ final class AuthenticationManager: ObservableObject {
       try? await zipBucketRef.setData(userInfo, merge: true)
 
     } catch {
+      #if DEBUG
       print("AuthenticationManager: Error updating zip code: \(error.localizedDescription)")
+      #endif
       throw error
     }
   }
@@ -304,7 +401,9 @@ final class AuthenticationManager: ObservableObject {
     }
 
     let userId = user.uid
+    #if DEBUG
     print("AuthenticationManager: Starting complete account deletion for user: \(userId)")
+    #endif
 
     // Step 1: Delete all user's pins from Firestore
     do {
@@ -314,11 +413,17 @@ final class AuthenticationManager: ObservableObject {
 
       for document in pinsSnapshot.documents {
         try await document.reference.delete()
+        #if DEBUG
         print("AuthenticationManager: Deleted pin: \(document.documentID)")
+        #endif
       }
+      #if DEBUG
       print("AuthenticationManager: Deleted \(pinsSnapshot.documents.count) user pins")
+      #endif
     } catch {
+      #if DEBUG
       print("AuthenticationManager: Error deleting user pins: \(error)")
+      #endif
       // Continue with deletion even if pins can't be deleted
     }
 
@@ -330,26 +435,38 @@ final class AuthenticationManager: ObservableObject {
 
       for document in reportsSnapshot.documents {
         try await document.reference.delete()
+        #if DEBUG
         print("AuthenticationManager: Deleted report: \(document.documentID)")
+        #endif
       }
+      #if DEBUG
       print("AuthenticationManager: Deleted \(reportsSnapshot.documents.count) user reports")
+      #endif
     } catch {
+      #if DEBUG
       print("AuthenticationManager: Error deleting user reports: \(error)")
+      #endif
       // Continue with deletion
     }
 
     // Step 3: Delete user profile from Firestore
     do {
       try await db.collection("users").document(userId).delete()
+      #if DEBUG
       print("AuthenticationManager: Deleted user profile from Firestore")
+      #endif
     } catch {
+      #if DEBUG
       print("AuthenticationManager: Error deleting user profile: \(error)")
+      #endif
       // Continue with deletion
     }
 
     // Step 4: Delete Firebase Auth account
     try await user.delete()
+    #if DEBUG
     print("AuthenticationManager: Deleted Firebase Auth account")
+    #endif
 
     // Step 5: Clear local state
     await MainActor.run {
@@ -359,7 +476,9 @@ final class AuthenticationManager: ObservableObject {
       self.errorMessage = nil
     }
 
+    #if DEBUG
     print("AuthenticationManager: Account deletion completed successfully")
+    #endif
   }
 
   // Listen for premium status updates
@@ -370,10 +489,14 @@ final class AuthenticationManager: ObservableObject {
       queue: .main
     ) { [weak self] _ in
       Task { @MainActor in
+        #if DEBUG
         print("AuthenticationManager: Received premium status update notification")
+        #endif
         // Reload user profile to get updated premium status
         if let userId = self?.currentUser?.uid {
+          #if DEBUG
           print("AuthenticationManager: Reloading user profile after premium update")
+          #endif
           await self?.loadUserProfile(userId: userId)
         }
       }
@@ -382,16 +505,22 @@ final class AuthenticationManager: ObservableObject {
 
   /// Updates user's premium status (called by PremiumManager)
   func updatePremiumStatus(_ isPremium: Bool) async {
+    #if DEBUG
     print("AuthenticationManager: updatePremiumStatus called with isPremium: \(isPremium)")
+    #endif
     guard let userId = currentUser?.uid else {
+      #if DEBUG
       print("AuthenticationManager: Cannot update premium status - no current user")
+      #endif
       return
     }
 
     do {
       // Update premium status in Firestore
       try await db.collection("users").document(userId).updateData(["isPremium": isPremium])
+      #if DEBUG
       print("AuthenticationManager: Updated premium status in Firestore to: \(isPremium)")
+      #endif
 
       // Update local profile on main actor
       await MainActor.run {
@@ -407,21 +536,79 @@ final class AuthenticationManager: ObservableObject {
             createdAt: profile.createdAt,
             lastActive: Date(),
             isPremium: isPremium,
-            originalZipCode: profile.originalZipCode
+            originalZipCode: profile.originalZipCode,
+            purchasedZipCodes: profile.purchasedZipCodes,
+            currentZipCode: profile.currentZipCode,
+            currentZipUpdatedAt: profile.currentZipUpdatedAt,
+            zipCodeNotifications: profile.zipCodeNotifications
           )
           self.currentUserProfile = updatedProfile
+          #if DEBUG
           print("AuthenticationManager: Updated local premium status to: \(isPremium)")
+          #endif
           print(
             "AuthenticationManager: New profile isPremium: \(self.currentUserProfile?.isPremium ?? false)"
           )
         } else {
+          #if DEBUG
           print("AuthenticationManager: No current user profile to update")
+          #endif
         }
       }
 
+      #if DEBUG
       print("AuthenticationManager: Premium status update completed")
+      #endif
     } catch {
+      #if DEBUG
       print("AuthenticationManager: Error updating premium status: \(error.localizedDescription)")
+      #endif
+    }
+  }
+
+  /// Updates notification preference for a specific zip code
+  func updateNotificationPreference(_ enabled: Bool, for zipCode: String) async {
+    #if DEBUG
+    print("AuthenticationManager: updateNotificationPreference called for zipCode: \(zipCode), enabled: \(enabled)")
+    #endif
+    guard let userId = currentUser?.uid else {
+      #if DEBUG
+      print("AuthenticationManager: Cannot update notification preference - no current user")
+      #endif
+      return
+    }
+
+    do {
+      // Update notification preference in Firestore
+      try await db.collection("users").document(userId).updateData([
+        "zipCodeNotifications.\(zipCode)": enabled
+      ])
+      #if DEBUG
+      print("AuthenticationManager: Updated notification preference in Firestore for zipCode: \(zipCode) to: \(enabled)")
+      #endif
+
+      // Update local profile on main actor
+      await MainActor.run {
+        if var profile = self.currentUserProfile {
+          profile.setNotifications(enabled, for: zipCode)
+          self.currentUserProfile = profile
+          #if DEBUG
+          print("AuthenticationManager: Updated local notification preference for zipCode: \(zipCode) to: \(enabled)")
+          #endif
+        } else {
+          #if DEBUG
+          print("AuthenticationManager: No current user profile to update")
+          #endif
+        }
+      }
+
+      #if DEBUG
+      print("AuthenticationManager: Notification preference update completed")
+      #endif
+    } catch {
+      #if DEBUG
+      print("AuthenticationManager: Error updating notification preference: \(error.localizedDescription)")
+      #endif
     }
   }
 

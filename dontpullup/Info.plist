@@ -37,10 +37,6 @@
 	</dict>
 	<key>NSCameraUsageDescription</key>
 	<string>Camera access is needed to record incident videos. You are solely responsible for any content you record and share. By recording content, you confirm you have the right to record and accept responsibility for its contents.</string>
-	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>Location access is required to verify and place incident markers within 200 feet of your position. You are responsible for ensuring the accuracy of location data. The app uses location data solely for incident verification and placement.</string>
-	<key>NSLocationAlwaysUsageDescription</key>
-	<string>Location access is required to verify and place incident markers within 200 feet of your position</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Location access is required to verify and place incident markers within 200 feet of your position. You are responsible for ensuring the accuracy of location data. The app uses location data solely for incident verification and placement.</string>
 	<key>NSMicrophoneUsageDescription</key>

@@ -3,7 +3,7 @@ import UserNotifications
 
 struct SettingsView: View {
   @EnvironmentObject private var authState: AuthState
-  @StateObject private var authManager = AuthenticationManager.shared
+  @ObservedObject private var authManager = AuthenticationManager.shared
   @StateObject private var premiumManager = PremiumManager.shared
   @Environment(\.dismiss) private var dismiss
 
@@ -12,24 +12,25 @@ struct SettingsView: View {
   @AppStorage("hapticFeedbackEnabled") private var hapticFeedbackEnabled = true
 
   @State private var showResetConfirmation = false
-  @State private var showZipCodeEditor = false
-  @State private var newZipCode = ""
-  @State private var showPremiumView = false
-
   @State private var showNotificationsAlert = false
+  @State private var activeSheet: SettingsSheet?
 
   var body: some View {
     NavigationView {
       NoBounceScrollView {
         VStack(spacing: 20) {
+          Spacer().frame(height: 8)
           // GENERAL section
           DPUSectionHeader(title: "GENERAL")
 
-          DPUCard {
-            // Enable Notifications toggle with permission request and alert
-            Toggle("Enable Notifications", isOn: $notificationsEnabled)
-              .toggleStyle(SwitchToggleStyle(tint: .red))
-              .padding(.vertical, 10)
+          ModernDPUCard {
+            VStack(spacing: 16) {
+              // Enable Notifications toggle with permission request and alert
+              EnhancedToggle(
+                isOn: $notificationsEnabled,
+                label: "Enable Notifications",
+                description: "Receive alerts about incidents in your areas"
+              )
               .onChange(of: notificationsEnabled) { newValue in
                 if newValue {
                   UNUserNotificationCenter.current().requestAuthorization(
@@ -52,32 +53,48 @@ struct SettingsView: View {
                 Text("To fully disable push notifications, please turn them off in your device's Settings app.")
               }
 
-            // Dark Mode toggle that actually applies color scheme
-            Toggle("Dark Mode", isOn: $darkModeEnabled)
-              .toggleStyle(SwitchToggleStyle(tint: .red))
-              .padding(.vertical, 10)
+              // Dark Mode toggle that actually applies color scheme
+              EnhancedToggle(
+                isOn: $darkModeEnabled,
+                label: "Dark Mode",
+                description: "Use dark theme for better visibility at night"
+              )
 
-            // Haptic Feedback toggle
-            Toggle("Haptic Feedback", isOn: $hapticFeedbackEnabled)
-              .toggleStyle(SwitchToggleStyle(tint: .red))
-              .padding(.vertical, 10)
+              // Haptic Feedback toggle
+              EnhancedToggle(
+                isOn: $hapticFeedbackEnabled,
+                label: "Haptic Feedback",
+                description: "Vibrate when interacting with buttons"
+              )
+            }
 
             // Direct way to launch tutorial for testing
-            Button(action: {
+            ModernButton(
+              title: "Show Tutorial Guide",
+              systemImage: "questionmark.circle",
+              style: .secondary
+            ) {
               UserDefaults.standard.set(false, forKey: "hasSeenTutorial")
               NotificationCenter.default.post(
                 name: Notification.Name("ShowTutorialOverlay"), object: nil)
-            }) {
-              Label("Show Tutorial Guide", systemImage: "questionmark.circle")
-                .foregroundColor(.blue)
             }
-            .padding(.vertical, 10)
+          }
+
+          // NOTIFICATIONS section
+          DPUSectionHeader(title: "NOTIFICATIONS")
+
+          ModernDPUCard {
+            ModernButton(
+              title: "Notification Preferences",
+              systemImage: "bell.badge",
+              style: .secondary
+            ) {
+              activeSheet = .notifications
+            }
           }
 
           // PREMIUM section
           if let userProfile = authManager.currentUserProfile {
-            let _ = print(
-              "[SettingsView] Rendering premium section - isPremium: \(userProfile.isPremium)")
             DPUSectionHeader(title: userProfile.isPremium ? "PREMIUM SETTINGS" : "UPGRADE")
 
             DPUCard {
@@ -107,11 +124,12 @@ struct SettingsView: View {
                     }
                     Spacer()
                     Button(action: {
+                      #if DEBUG
                       print(
                         "[SettingsView] Change button tapped - isPremium: \(userProfile.isPremium)")
                       print("[SettingsView] Current zip: \(userProfile.zipCode)")
-                      newZipCode = userProfile.zipCode
-                      showZipCodeEditor = true
+                      #endif
+                      activeSheet = .zipEditor
                     }) {
                       Text("Change")
                         .foregroundColor(userProfile.isPremium ? .blue : .gray)
@@ -141,7 +159,7 @@ struct SettingsView: View {
                     }
                     Spacer()
                     Button(action: {
-                      showPremiumView = true
+                      activeSheet = .premium
                     }) {
                       Text("Upgrade")
                         .foregroundColor(.yellow)
@@ -231,7 +249,8 @@ struct SettingsView: View {
             .padding(.vertical, 8)
           }
         }
-        .padding()
+        .padding(.horizontal, 20)
+        .padding(.vertical, 24)
       }
       .navigationTitle("Settings")
       .navigationBarTitleDisplayMode(.inline)
@@ -243,35 +262,34 @@ struct SettingsView: View {
       } message: {
         Text("Are you sure you want to reset all settings to their default values?")
       }
-      .sheet(isPresented: $showZipCodeEditor) {
-        ZipCodeEditorView(
-          currentZipCode: authManager.currentUserProfile?.zipCode ?? "",
-          onSave: { newZip in
-            Task {
-              do {
-                try await authManager.updateZipCode(newZip)
-                showZipCodeEditor = false
-              } catch {
-                // Handle error (show alert)
-                print("Failed to update zip code: \(error.localizedDescription)")
-              }
+      .sheet(item: $activeSheet) { sheet in
+        switch sheet {
+        case .zipEditor:
+          ZipCodeEditorView(
+            currentZipCode: authManager.currentUserProfile?.zipCode ?? "",
+            onSave: { newZip in
+              handleZipCodeSave(newZip)
+            },
+            onCancel: {
+              activeSheet = nil
             }
-          },
-          onCancel: {
-            showZipCodeEditor = false
-          }
-        )
-      }
-      .sheet(isPresented: $showPremiumView) {
-        PremiumView()
+          )
+        case .premium:
+          PremiumView()
+        case .notifications:
+          NotificationSettingsView()
+        }
       }
     }
+    .dpuBackground()
     .navigationViewStyle(.stack)
     .preferredColorScheme(darkModeEnabled ? .dark : .light)
     .onAppear {
+      #if DEBUG
       print(
         "[SettingsView] onAppear – isPremium = \(authManager.currentUserProfile?.isPremium ?? false)"
       )
+      #endif
     }
   }
 
@@ -309,6 +327,246 @@ struct SettingsView: View {
 
       // The RootView will automatically show the AuthView since the user is now signed out
     }
+  }
+
+  private func handleZipCodeSave(_ newZip: String) {
+    Task {
+      do {
+        try await authManager.updateZipCode(newZip)
+        await MainActor.run {
+          activeSheet = nil
+        }
+      } catch {
+        #if DEBUG
+        print("Failed to update zip code: \(error.localizedDescription)")
+        #endif
+      }
+    }
+  }
+}
+
+private enum SettingsSheet: Identifiable {
+  case zipEditor
+  case premium
+  case notifications
+
+  var id: Int { hashValue }
+}
+
+// MARK: - Notification Settings Sheet
+
+private struct NotificationSettingsView: View {
+  @ObservedObject private var authManager = AuthenticationManager.shared
+  @Environment(\.dismiss) private var dismiss
+
+  var body: some View {
+    NavigationView {
+      NoBounceScrollView {
+        VStack(spacing: 20) {
+          Spacer().frame(height: 12)
+
+          VStack(spacing: 8) {
+            Image(systemName: "bell.badge")
+              .resizable()
+              .aspectRatio(contentMode: .fit)
+              .frame(width: 60, height: 60)
+              .foregroundColor(DPUTheme.colors.electricBlue)
+
+            Text("Notification Settings")
+              .font(.title)
+              .fontWeight(.bold)
+              .foregroundColor(.white)
+
+            Text("Control which areas send you notifications")
+              .font(.subheadline)
+              .foregroundColor(.gray)
+              .multilineTextAlignment(.center)
+          }
+          .padding(.top, 20)
+
+          if let profile = authManager.currentUserProfile {
+            DPUSectionHeader(title: "ZIP CODE NOTIFICATIONS")
+
+            ModernDPUCard {
+              VStack(spacing: 16) {
+                ForEach(profile.accessibleZipCodes.sorted(), id: \.self) { zipCode in
+                  NotificationToggleRow(
+                    zipCode: zipCode,
+                    isEnabled: profile.notificationsEnabled(for: zipCode),
+                    profile: profile
+                  ) { enabled in
+                    Task {
+                      await authManager.updateNotificationPreference(enabled, for: zipCode)
+                    }
+                  }
+                }
+
+                if profile.accessibleZipCodes.isEmpty {
+                  Text("No accessible zip codes")
+                    .foregroundColor(.gray)
+                    .font(.subheadline)
+                    .padding()
+                }
+              }
+            }
+
+            DPUSectionHeader(title: "ABOUT")
+
+            ModernDPUCard {
+              VStack(alignment: .leading, spacing: 16) {
+                InfoRow(
+                  icon: "house.fill",
+                  title: "Home Area",
+                  description: "Your original signup zip code - always accessible"
+                )
+
+                if profile.isPremium {
+                  InfoRow(
+                    icon: "star.fill",
+                    title: "Premium Access",
+                    description: "All zip codes available as notification areas"
+                  )
+                } else if !profile.purchasedZipCodes.isEmpty {
+                  InfoRow(
+                    icon: "checkmark.circle.fill",
+                    title: "Purchased Areas",
+                    description:
+                      "\(profile.purchasedZipCodes.count) additional zip code(s) unlocked"
+                  )
+                }
+
+                InfoRow(
+                  icon: "location.fill",
+                  title: "Current Location",
+                  description: "Areas you're physically in receive notifications"
+                )
+              }
+            }
+          } else {
+            Text("Please sign in to manage notification settings")
+              .foregroundColor(.gray)
+              .padding()
+          }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 24)
+      }
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbar {
+        ToolbarItem(placement: .navigationBarTrailing) {
+          Button("Done") {
+            dismiss()
+          }
+          .foregroundColor(.white)
+        }
+      }
+    }
+    .dpuBackground()
+    .preferredColorScheme(.dark)
+  }
+}
+
+private struct NotificationToggleRow: View {
+  let zipCode: String
+  @State private var isEnabled: Bool
+  let profile: UserProfile
+  let onToggle: (Bool) -> Void
+
+  init(zipCode: String, isEnabled: Bool, profile: UserProfile, onToggle: @escaping (Bool) -> Void) {
+    self.zipCode = zipCode
+    self._isEnabled = State(initialValue: isEnabled)
+    self.profile = profile
+    self.onToggle = onToggle
+  }
+
+  var body: some View {
+    HStack {
+      VStack(alignment: .leading, spacing: 4) {
+        HStack {
+          Text(zipCode)
+            .font(.headline)
+            .foregroundColor(.white)
+
+          if zipCode == profile.originalZipCode {
+            BadgeView(text: "Home", color: .green)
+          } else if profile.purchasedZipCodes.contains(zipCode) {
+            BadgeView(text: "Purchased", color: .blue)
+          } else if profile.isPremium {
+            BadgeView(text: "Premium", color: .yellow)
+          }
+        }
+
+        Text(description)
+          .font(.caption)
+          .foregroundColor(.gray)
+      }
+
+      Spacer()
+
+      Toggle("", isOn: $isEnabled)
+        .toggleStyle(SwitchToggleStyle(tint: DPUTheme.colors.electricBlue))
+        .onChange(of: isEnabled) { newValue in
+          onToggle(newValue)
+        }
+    }
+    .padding(.vertical, 8)
+  }
+
+  private var description: String {
+    if zipCode == profile.originalZipCode {
+      return "Your home area - always accessible"
+    } else if profile.purchasedZipCodes.contains(zipCode) {
+      return "Purchased access - permanent"
+    } else if profile.isPremium {
+      return "Premium access - unlimited"
+    }
+    return "Available area"
+  }
+}
+
+private struct InfoRow: View {
+  let icon: String
+  let title: String
+  let description: String
+
+  var body: some View {
+    HStack(alignment: .top, spacing: 12) {
+      Image(systemName: icon)
+        .foregroundColor(.blue)
+        .frame(width: 24, height: 24)
+
+      VStack(alignment: .leading, spacing: 2) {
+        Text(title)
+          .font(.subheadline)
+          .fontWeight(.medium)
+          .foregroundColor(.white)
+
+        Text(description)
+          .font(.caption)
+          .foregroundColor(.gray)
+      }
+    }
+  }
+}
+
+private struct BadgeView: View {
+  let text: String
+  let color: Color
+
+  var body: some View {
+    Text(text.uppercased())
+      .font(.caption2.weight(.semibold))
+      .foregroundColor(DPUTheme.colors.lightGray)
+      .padding(.horizontal, 8)
+      .padding(.vertical, 4)
+      .background(
+        Capsule(style: .continuous)
+          .fill(color.opacity(0.15))
+          .overlay(
+            Capsule(style: .continuous)
+              .stroke(color.opacity(0.45), lineWidth: 0.8)
+          )
+      )
   }
 }
 
@@ -365,10 +623,12 @@ struct AboutView: View {
         .foregroundColor(.white)
         .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly
       }
-      .padding()
+      .padding(.horizontal, 20)
+      .padding(.vertical, 24)
     }
     .navigationTitle("About")
     .navigationBarTitleDisplayMode(.inline)
+    .dpuBackground()
   }
 }
 
@@ -482,10 +742,12 @@ struct PrivacyPolicyView: View {
           .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly
         }
       }
-      .padding()
+      .padding(.horizontal, 20)
+      .padding(.vertical, 24)
     }
     .navigationTitle("Privacy Policy")
     .navigationBarTitleDisplayMode(.inline)
+    .dpuBackground()
   }
 }
 
@@ -599,10 +861,12 @@ struct TermsOfServiceView: View {
           .fixedSize(horizontal: false, vertical: true)  // Allow text to wrap properly
         }
       }
-      .padding()
+      .padding(.horizontal, 20)
+      .padding(.vertical, 24)
     }
     .navigationTitle("Terms of Service")
     .navigationBarTitleDisplayMode(.inline)
+    .dpuBackground()
   }
 }
 

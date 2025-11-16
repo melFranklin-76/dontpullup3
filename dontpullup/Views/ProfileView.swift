@@ -33,7 +33,7 @@ struct ProfileView: View {
 
   // Access managers
   @StateObject private var premiumManager = PremiumManager.shared
-  @StateObject private var authManager = AuthenticationManager.shared
+  @ObservedObject private var authManager = AuthenticationManager.shared
 
   // Computed property for premium status
   private var isPremium: Bool {
@@ -44,6 +44,7 @@ struct ProfileView: View {
     // Content wrapped in the universal scroll view
     NoBounceScrollView {
       VStack(spacing: 20) {
+        Spacer().frame(height: 8)
         // Profile header
         DPUCard {
           VStack(spacing: 16) {
@@ -139,12 +140,138 @@ struct ProfileView: View {
               .foregroundColor(.gray)
               .padding(.bottom, 4)
 
-            if !isPremium {
-              Text("Original Zip Code: \(originalZipCode) (Locked)")
+            // Current zip code display
+            VStack(alignment: .leading, spacing: 8) {
+              Text("Current Zip Code")
                 .font(.caption)
-                .foregroundColor(.orange)
-                .padding(.bottom, 4)
+                .foregroundColor(.gray)
 
+              Text(authManager.currentUserProfile?.zipCode ?? "")
+                .font(.title3)
+                .fontWeight(.bold)
+                .foregroundColor(.white)
+                .padding()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.blue.opacity(0.2))
+                .cornerRadius(8)
+            }
+            .padding(.bottom, 16)
+
+            // Display unlocked zip codes
+            if let profile = authManager.currentUserProfile {
+              VStack(alignment: .leading, spacing: 12) {
+                Text("Unlocked Areas")
+                  .font(.subheadline)
+                  .fontWeight(.semibold)
+                  .foregroundColor(.white)
+                  .padding(.top, 8)
+
+                // Home zip code (always unlocked)
+                HStack(spacing: 12) {
+                  Image(systemName: "house.fill")
+                    .foregroundColor(.green)
+                    .frame(width: 24)
+                  
+                  VStack(alignment: .leading, spacing: 2) {
+                    Text(profile.originalZipCode)
+                      .font(.system(size: 16, weight: .semibold))
+                      .foregroundColor(.white)
+                    Text("Home Area")
+                      .font(.caption)
+                      .foregroundColor(.gray)
+                  }
+                  
+                  Spacer()
+                  
+                  Image(systemName: "checkmark.circle.fill")
+                    .foregroundColor(.green)
+                }
+                .padding(12)
+                .background(Color.green.opacity(0.1))
+                .cornerRadius(8)
+
+                // Purchased zip codes
+                if !profile.purchasedZipCodes.isEmpty {
+                  ForEach(profile.purchasedZipCodes, id: \.self) { zipCode in
+                    HStack(spacing: 12) {
+                      Image(systemName: "location.fill")
+                        .foregroundColor(.blue)
+                        .frame(width: 24)
+                      
+                      VStack(alignment: .leading, spacing: 2) {
+                        Text(zipCode)
+                          .font(.system(size: 16, weight: .semibold))
+                          .foregroundColor(.white)
+                        Text("Purchased Area")
+                          .font(.caption)
+                          .foregroundColor(.gray)
+                      }
+                      
+                      Spacer()
+                      
+                      Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.blue)
+                    }
+                    .padding(12)
+                    .background(Color.blue.opacity(0.1))
+                    .cornerRadius(8)
+                  }
+                }
+
+                // Premium badge showing unlimited access
+                if profile.isPremium {
+                  HStack(spacing: 12) {
+                    Image(systemName: "star.fill")
+                      .foregroundColor(.yellow)
+                      .frame(width: 24)
+                    
+                    VStack(alignment: .leading, spacing: 2) {
+                      Text("All Areas")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.yellow)
+                      Text("Premium Unlimited Access")
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                    }
+                    
+                    Spacer()
+                    
+                    Image(systemName: "infinity")
+                      .foregroundColor(.yellow)
+                  }
+                  .padding(12)
+                  .background(Color.yellow.opacity(0.1))
+                  .cornerRadius(8)
+                } else {
+                  // Show unlock more option for non-premium users
+                  Button(action: {
+                    // Navigate to zip code purchase view
+                    NotificationCenter.default.post(name: NSNotification.Name("ShowZipCodePurchase"), object: nil)
+                  }) {
+                    HStack(spacing: 12) {
+                      Image(systemName: "plus.circle.fill")
+                        .foregroundColor(.blue)
+                        .frame(width: 24)
+                      
+                      Text("Unlock More Areas")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.blue)
+                      
+                      Spacer()
+                      
+                      Image(systemName: "chevron.right")
+                        .foregroundColor(.blue)
+                    }
+                    .padding(12)
+                    .background(Color.blue.opacity(0.1))
+                    .cornerRadius(8)
+                  }
+                }
+              }
+              .padding(.bottom, 8)
+            }
+
+            if !isPremium {
               Text("Premium upgrade required to change your zip code")
                 .font(.caption)
                 .foregroundColor(.gray)
@@ -181,7 +308,7 @@ struct ProfileView: View {
                 ProgressView()
                   .progressViewStyle(CircularProgressViewStyle(tint: .white))
               } else {
-                Text("Update Location")
+                Text(isEditingZipCode ? "Update Location" : "Edit Zip Code")
                   .fontWeight(.semibold)
               }
             }
@@ -234,8 +361,10 @@ struct ProfileView: View {
           }
         }
       }
-      .padding()
+      .padding(.horizontal, 20)
+      .padding(.vertical, 24)
     }
+    .dpuBackground()
     .alert("Sign Out", isPresented: $showSignOutConfirmation) {
       Button("Cancel", role: .cancel) {}
       Button("Sign Out", role: .destructive) {
@@ -304,6 +433,8 @@ struct ProfileView: View {
 
   // Method to start editing zip code
   private func startEditingZipCode() {
+    // Set the text field to the current zip code value
+    newZipCode = authManager.currentUserProfile?.zipCode ?? ""
     isEditingZipCode = true
   }
 
@@ -326,12 +457,28 @@ struct ProfileView: View {
     isUpdatingZipCode = true
 
     // Use AuthenticationManager's method which handles premium validation
+    #if DEBUG
+    print("[ProfileView] Attempting to update zip code to: \(newZipCode)")
+    print("[ProfileView] Current user premium status: \(isPremium)")
+    #endif
+
     Task {
       do {
+        #if DEBUG
+        print("[ProfileView] Calling authManager.updateZipCode(\(newZipCode))")
+        #endif
         try await authManager.updateZipCode(newZipCode)
 
         // Update UI on main thread
         await MainActor.run {
+          #if DEBUG
+          print("[ProfileView] Zip code update successful")
+          print("[ProfileView] New current zip code: \(authManager.currentUserProfile?.zipCode ?? "unknown")")
+          #endif
+          // Update the local state to reflect the new zip code
+          if let updatedZip = authManager.currentUserProfile?.zipCode {
+            newZipCode = updatedZip
+          }
           isEditingZipCode = false
           isUpdatingZipCode = false
         }
@@ -425,6 +572,7 @@ struct PremiumUpgradeView: View {
     NavigationView {
       NoBounceScrollView {
         VStack(spacing: 24) {
+          Spacer().frame(height: 8)
           // Premium header
           VStack(spacing: 12) {
             Image(systemName: "star.circle.fill")
@@ -509,7 +657,8 @@ struct PremiumUpgradeView: View {
           .padding(.bottom)
           .disabled(premiumManager.isLoading)
         }
-        .padding()
+        .padding(.horizontal, 20)
+        .padding(.vertical, 24)
       }
       .navigationBarItems(trailing: Button("Close") { dismiss() })
       .navigationBarTitle("", displayMode: .inline)
@@ -539,6 +688,7 @@ struct PremiumUpgradeView: View {
         premiumManager.resetPurchaseState()
       }
     }
+    .dpuBackground()
   }
 }
 

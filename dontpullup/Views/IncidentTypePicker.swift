@@ -3,6 +3,28 @@ import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
+@MainActor
+final class PresentationCoordinator {
+  static let shared = PresentationCoordinator()
+  private var isPresenting = false
+
+  func beginPresentation(_ context: String) -> Bool {
+    guard !isPresenting else {
+      print("[PresentationCoordinator] Blocked presentation: \(context) (another is active)")
+      return false
+    }
+    isPresenting = true
+    return true
+  }
+
+  func endPresentation() {
+    isPresenting = false
+  }
+}
+
+private let maxVideoDurationSeconds: Double = 180
+private let cameraSafetyDurationSeconds: Double = 170
+
 // Global function to show error banners from anywhere in this file
 func showGlobalErrorBanner(_ message: String) {
   print("[IncidentTypePicker] SHOWING GLOBAL ERROR BANNER: \(message)")
@@ -95,70 +117,75 @@ struct IncidentTypePicker: View {
 
   var body: some View {
     ZStack {
-      NoBounceScrollView {
-        VStack(spacing: 24) {
-          Text("Select Incident Type")
-            .font(.title)
-            .fontWeight(.bold)
-            .foregroundColor(.white)
-            .padding(.top, 24)
-            .padding(.bottom, 8)
+      ScrollView(.vertical, showsIndicators: false) {
+        VStack(alignment: .leading, spacing: 24) {
+          VStack(alignment: .leading, spacing: 8) {
+            Text("Select Incident Type")
+              .font(.system(size: 30, weight: .bold, design: .rounded))
+              .foregroundColor(DPUTheme.colors.lightGray)
 
-        // Incident type buttons with improved spacing
-        VStack(spacing: 16) {
-          ForEach(IncidentType.allCases, id: \.self) { type in
-            DPUCard(backgroundColor: Color.black.opacity(0.6)) {
-              Button(action: {
-                selectedType = type
-                // Show media options sheet instead of immediately presenting picker
-                showMediaOptions = true
-              }) {
-                HStack {
-                  Text(type.emoji)
-                    .font(.system(size: 36))
-                    .frame(width: 60)
+            Text("Pick the category that best matches what happened. You’ll attach evidence right after this step.")
+              .font(.subheadline)
+              .foregroundColor(DPUTheme.colors.mutedGray)
+          }
 
-                  VStack(alignment: .leading, spacing: 4) {
-                    Text(type.title)
-                      .font(.headline)
-                      .foregroundColor(.white)
+          VStack(spacing: 16) {
+            ForEach(IncidentType.allCases, id: \.self) { type in
+              DPUCard {
+                Button(action: {
+                  selectedType = type
+                  showMediaOptions = true
+                }) {
+                  HStack(alignment: .top, spacing: 16) {
+                    Text(type.emoji)
+                      .font(.system(size: 36))
+                      .frame(width: 48)
 
-                    Text(type.description)
-                      .font(.subheadline)
-                      .foregroundColor(.gray)
-                      .fixedSize(horizontal: false, vertical: true)
+                    VStack(alignment: .leading, spacing: 6) {
+                      Text(type.title)
+                        .font(.headline)
+                        .foregroundColor(DPUTheme.colors.lightGray)
+
+                      Text(type.description)
+                        .font(.subheadline)
+                        .foregroundColor(DPUTheme.colors.mutedGray)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Spacer()
+
+                    Image(systemName: "chevron.right")
+                      .foregroundColor(DPUTheme.colors.mutedGray)
                   }
-                  .padding(.vertical, 8)
-
-                  Spacer()
-
-                  Image(systemName: "chevron.right")
-                    .foregroundColor(.gray)
-                    .padding(.trailing, 8)
+                  .padding(.vertical, 4)
+                  .contentShape(Rectangle())
                 }
-                .contentShape(Rectangle())
+                .buttonStyle(PlainButtonStyle())
               }
-              .buttonStyle(PlainButtonStyle())
             }
           }
-        }
 
-        Spacer(minLength: 40)
+          Divider()
+            .background(DPUTheme.colors.subtleSeparator)
 
-        DPUCard(backgroundColor: Color.black.opacity(0.6)) {
-          Button(action: {
+          ModernButton(
+            title: "Cancel",
+            systemImage: "xmark.circle",
+            style: .secondary
+          ) {
             presentationMode.wrappedValue.dismiss()
-          }) {
-            Text("Cancel")
-              .font(.headline)
-              .foregroundColor(.red)
-              .frame(maxWidth: .infinity)
-              .padding(.vertical, 10)
           }
         }
+        .glassSheetStyle()
       }
-      .padding(.horizontal, 16)
+
+      if viewModel.uploadProgress > 0 && viewModel.uploadProgress < 1.0 {
+        UploadProgressOverlay(viewModel: viewModel)
+          .transition(.opacity)
+          .animation(.easeInOut(duration: 0.3), value: viewModel.uploadProgress)
+      }
     }
+    .dpuBackground()
     .actionSheet(isPresented: $showMediaOptions) {
       ActionSheet(
         title: Text("Add Media"),
@@ -201,14 +228,6 @@ struct IncidentTypePicker: View {
         shouldPresentPicker = false
       }
     }
-      
-      // Show upload progress overlay when uploading
-      if viewModel.uploadProgress > 0 && viewModel.uploadProgress < 1.0 {
-        UploadProgressOverlay(viewModel: viewModel)
-          .transition(.opacity)
-          .animation(.easeInOut(duration: 0.3), value: viewModel.uploadProgress)
-      }
-    }
   }
 }
 
@@ -244,6 +263,11 @@ func presentVideoPickerDirectly(
           let window = windowScene.windows.first,
           let rootVC = window.rootViewController
         {
+          guard PresentationCoordinator.shared.beginPresentation("Photo Picker") else {
+            showGlobalErrorBanner("Another media picker is already open. Please finish that first.")
+            return
+          }
+          
           var topController = rootVC
           while let presented = topController.presentedViewController {
             topController = presented
@@ -300,8 +324,8 @@ func presentVideoRecorder(
         imagePicker.sourceType = .camera
         imagePicker.mediaTypes = [UTType.movie.identifier]
         imagePicker.cameraCaptureMode = .video
-        imagePicker.videoMaximumDuration = 180  // 3 minutes
-        imagePicker.videoQuality = .typeHigh
+        imagePicker.videoMaximumDuration = cameraSafetyDurationSeconds
+        imagePicker.videoQuality = .typeMedium  // Changed from .typeHigh to reduce initial file size
         imagePicker.allowsEditing = true
 
         // Create the delegate adapter
@@ -322,10 +346,16 @@ func presentVideoRecorder(
           }
 
           // Present the camera picker
+          guard PresentationCoordinator.shared.beginPresentation("Video Recorder") else {
+            showGlobalErrorBanner("Another media picker is already open. Please finish that first.")
+            return
+          }
+
           topController.present(imagePicker, animated: true) {
             print("[IncidentTypePicker] Video recorder presented successfully")
           }
         } else {
+          PresentationCoordinator.shared.endPresentation()
           showGlobalErrorBanner("Could not present video recorder")
         }
       } else {
@@ -420,6 +450,7 @@ class VideoDelegateAdapter: NSObject, PHPickerViewControllerDelegate {
 
     // Only dismiss the video picker, keep the incident type picker open to show progress
     picker.dismiss(animated: true) {
+      PresentationCoordinator.shared.endPresentation()
       if let result = selectedResult {
         print("[VideoDelegateAdapter] User selected a video, starting processing...")
 
@@ -473,6 +504,18 @@ class VideoDelegateAdapter: NSObject, PHPickerViewControllerDelegate {
         self.viewModel.clearPendingData()
         // Show error as a banner instead of alert
         self.showErrorBanner("Could not load video metadata")
+      }
+      return
+    }
+
+    let durationSeconds: Double = asset.duration
+
+    if durationSeconds > maxVideoDurationSeconds {
+      print("[VideoDelegateAdapter] Video duration \(durationSeconds)s exceeds limit")
+      await MainActor.run {
+        self.viewModel.uploadProgress = 0
+        self.viewModel.clearPendingData()
+        self.showErrorBanner("Videos must be 3 minutes or less. Please trim your clip and try again.")
       }
       return
     }
@@ -667,6 +710,7 @@ class VideoRecorderDelegateAdapter: NSObject, UIImagePickerControllerDelegate,
 
     // Only dismiss the camera/recorder, keep the incident type picker open to show progress
     picker.dismiss(animated: true) {
+      PresentationCoordinator.shared.endPresentation()
       // Get the video URL from the info dictionary
       guard let videoURL = info[.mediaURL] as? URL else {
         print("[VideoRecorderDelegateAdapter] No video URL found")
@@ -708,6 +752,7 @@ class VideoRecorderDelegateAdapter: NSObject, UIImagePickerControllerDelegate,
 
     // Dismiss both the recorder and the incident type picker on cancel
     picker.dismiss(animated: true) {
+      PresentationCoordinator.shared.endPresentation()
       DispatchQueue.main.async {
         self.viewModel.clearPendingData()
         self.presentationMode.wrappedValue.dismiss()
@@ -729,6 +774,24 @@ class VideoRecorderDelegateAdapter: NSObject, UIImagePickerControllerDelegate,
       let tempURL = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString)
         .appendingPathExtension("mp4")
+
+      let asset = AVURLAsset(url: videoURL)
+      let durationSeconds: Double
+      if #available(iOS 16.0, *) {
+        let loadedDuration = try await asset.load(.duration)
+        durationSeconds = CMTimeGetSeconds(loadedDuration)
+      } else {
+        durationSeconds = CMTimeGetSeconds(asset.duration)
+      }
+      guard durationSeconds <= cameraSafetyDurationSeconds else {
+        throw NSError(
+          domain: "VideoRecorderDelegateAdapter",
+          code: -2,
+          userInfo: [
+            NSLocalizedDescriptionKey:
+              "Recorded video is longer than 3 minutes. Please record a shorter clip."
+          ])
+      }
 
       // Copy the video to the temporary location
       try FileManager.default.copyItem(at: videoURL, to: tempURL)

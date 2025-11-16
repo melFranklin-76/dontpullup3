@@ -9,63 +9,63 @@ struct TutorialOverlayView: View {
     // Tutorial content pages
     private let tutorialPages = [
         TutorialPage(
-            title: "Welcome to Don't Pull Up",
-            message: "This app helps you identify and share incidents in your area. Swipe or tap to continue.",
+            title: "Welcome to Don't Pull Up, ON GRANDMA!",
+            message: "Long-press to report what you see, attach short clips, and warn neighbors across your zip.",
+            emoji: "🚨"
+        ),
+        TutorialPage(
+            title: "Explore the Map",
+            message: "Pan or pinch to zoom. Tap the green location button to focus on roughly a 200-foot circle around you.",
             emoji: "🗺️"
         ),
         TutorialPage(
-            title: "Map Navigation",
-            message: "Pan and zoom the map to explore your area. Tap the location button to center on your position.",
-            emoji: "📍"
+            title: "Navigation Mode",
+            message: "Tap the location button again to enable follow mode. The button turns blue and the map tracks your movement.",
+            emoji: "🧭"
         ),
         TutorialPage(
-            title: "Incident Filters",
-            message: "Use the buttons on the right to filter incidents by type: verbal, physical, or emergency.",
-            emoji: "📢"
-        ),
-        TutorialPage(
-            title: "Reporting Incidents",
-            message: "Tap the pencil icon to enter edit mode, then long-press within 200 feet of your location to drop a pin.",
+            title: "Drop Pins Within Range",
+            message: "Long-press anywhere within 200 feet of your position. Pins outside that radius are blocked to keep reports accurate.",
             emoji: "📌"
         ),
         TutorialPage(
-            title: "Allow access to photo library, select a video (max 3 min).",
-            message: "The upload runs in the background & map updates automatically.",
+            title: "Choose Incident Type",
+            message: "Use the picker to tag Verbal, Physical, Emergency/911, or ICE encounters before submitting.",
+            emoji: "🏷️"
+        ),
+        TutorialPage(
+            title: "Attach Short Videos",
+            message: "Record live or pick a clip from Photos (max 3 minutes). Stay on the screen to watch the circular upload progress.",
             emoji: "🎬"
         ),
         TutorialPage(
-            title: "Your Pins",
-            message: "Tap the phone icon to view only pins you've dropped. You can edit or delete your own pins.",
+            title: "See Only Your Pins",
+            message: "Tap the blue phone icon to toggle a view of just the incidents you have reported.",
             emoji: "📱"
         ),
         TutorialPage(
-            title: "Map Types",
-            message: "Toggle between standard and satellite view by tapping the map icon in the toolbar.",
-            emoji: "🌎"
+            title: "Edit or Delete",
+            message: "Use the pencil button to enter edit mode, then tap one of your pins to remove it when a situation is resolved.",
+            emoji: "✏️"
         ),
         TutorialPage(
-            title: "Offline Mode",
-            message: "You can still view previously loaded pins when offline, but can't add new ones.",
-            emoji: "📶"
+            title: "Premium Access",
+            message: "Unlock extra zip codes or upgrade to unlimited playback so you can watch videos posted outside your home area.",
+            emoji: "💎"
         ),
         TutorialPage(
-            title: "Sign In",
-            message: "Create an account to save your data across devices and access all features.",
-            emoji: "👤"
+            title: "Filters & Alerts",
+            message: "Use the right-side buttons to filter by incident type. We'll still send quick push alerts for nearby emergencies.",
+            emoji: "🔔"
         ),
         TutorialPage(
-            title: "Settings",
-            message: "Access app settings, terms of service, and privacy policy through the gear icon.",
+            title: "Help & Settings",
+            message: "Need resources, terms, or privacy info? Tap the gear or question mark icons in the main tab anytime.",
             emoji: "⚙️"
         ),
         TutorialPage(
-            title: "Help",
-            message: "Tap the question mark icon for detailed help on using the app.",
-            emoji: "❓"
-        ),
-        TutorialPage(
-            title: "Ready to Go!",
-            message: "You're all set! Tap to start using Don't Pull Up.",
+            title: "You're Ready",
+            message: "Tap anywhere to dismiss and start reporting responsibly. Stay safe out there.",
             emoji: "🚀"
         )
     ]
@@ -112,14 +112,27 @@ struct TutorialOverlayView: View {
                 
                 Spacer()
                 
-                // Page indicator
-                Text("Tap anywhere to continue (\(currentPage + 1)/\(tutorialPages.count))")
-                    .font(.caption)
-                    .foregroundColor(.white)
-                    .padding(8)
-                    .background(Color.gray.opacity(0.6))
-                    .cornerRadius(8)
-                    .padding(.bottom, 40)
+                // Page indicator and dismiss instruction
+                VStack(spacing: 8) {
+                    Text("\(currentPage + 1) of \(tutorialPages.count)")
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.8))
+                    
+                    if currentPage < tutorialPages.count - 1 {
+                        Text("Tap anywhere to continue")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.9))
+                    } else {
+                        Text("Tap anywhere to dismiss")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.white)
+                    }
+                }
+                .padding(12)
+                .background(Color.gray.opacity(0.6))
+                .cornerRadius(10)
+                .padding(.bottom, 40)
             }
             .padding()
         }

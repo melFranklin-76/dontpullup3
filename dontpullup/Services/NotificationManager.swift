@@ -11,22 +11,9 @@ class NotificationManager: ObservableObject {
     private let db = Firestore.firestore()
     private let functions = Functions.functions()
     private let baseURL = "https://fcm.googleapis.com/fcm/send"
+    private let presenceFreshnessInterval: TimeInterval = 10 * 60  // 10 minutes window for live presence
     
-    private init() {
-        // Request notification permissions on init
-        requestNotificationPermissions()
-    }
-    
-    /// Request notification permissions
-    private func requestNotificationPermissions() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { granted, error in
-            if granted {
-                print("[NotificationManager] Notification permissions granted")
-            } else {
-                print("[NotificationManager] Notification permissions denied: \(error?.localizedDescription ?? "Unknown error")")
-            }
-        }
-    }
+    private init() {}
     
     /// Sends notification to all users in the same zip code when a pin is dropped
     /// - Parameters:
@@ -36,8 +23,31 @@ class NotificationManager: ObservableObject {
         print("[NotificationManager] Start notifying users for pin ID: \(pin.id) in zip code: \(zipCode)")
         
         do {
-            // Get all users in the same zip code
-            let usersToNotify = try await getUsersInZipCode(zipCode, excludingUserId: pin.userId)
+            // Get users whose home zip matches and users currently present in the area
+            async let homeUsersTask = getUsersInZipCode(zipCode, excludingUserId: pin.userId)
+            async let presenceUsersTask = getUsersCurrentlyInZipCode(zipCode, excludingUserId: pin.userId)
+            let (homeUsers, presenceUsers) = try await (homeUsersTask, presenceUsersTask)
+            
+            var combinedUsers: [String: UserProfile] = [:]
+            homeUsers.forEach { combinedUsers[$0.id] = $0 }
+            presenceUsers.forEach { combinedUsers[$0.id] = $0 }
+            let allUsers = Array(combinedUsers.values)
+
+            // Filter users based on their notification preferences for this zip code
+            var usersToNotify = [UserProfile]()
+            for user in allUsers {
+                guard user.notificationsEnabled(for: zipCode) else {
+                    print("[NotificationManager] User \(user.id) has notifications disabled for zip code \(zipCode) - skipping")
+                    continue
+                }
+                
+                if user.hasAccessToZipCode(zipCode) || user.currentZipCode == zipCode {
+                    usersToNotify.append(user)
+                    print("[NotificationManager] User \(user.id) eligible for zip \(zipCode) (access: \(user.hasAccessToZipCode(zipCode)), currentZip: \(user.currentZipCode ?? "nil"))")
+                } else {
+                    print("[NotificationManager] User \(user.id) does not have access or presence in zip \(zipCode) - skipping")
+                }
+            }
             
             // Detailed log of users and their FCM token status
             print("[NotificationManager] Users fetched for notification:")
@@ -56,12 +66,13 @@ class NotificationManager: ObservableObject {
             }
             
             // Collect all valid FCM tokens for production push notification
-            let recipientTokens = usersToNotify.compactMap { user -> String? in
-                guard let token = user.fcmToken, !token.isEmpty else {
-                    return nil
+            var tokenToUserId: [String: String] = [:]
+            for user in usersToNotify {
+                if let token = user.fcmToken, !token.isEmpty {
+                    tokenToUserId[token] = user.id
                 }
-                return token
             }
+            let recipientTokens = Array(tokenToUserId.keys)
             
             print("[NotificationManager] Collected recipient FCM tokens: \(recipientTokens)")
             
@@ -77,6 +88,7 @@ class NotificationManager: ObservableObject {
             // PRODUCTION PUSH NOTIFICATION: send via Cloud Function to all recipients
             await sendPushNotification(
                 to: recipientTokens,
+                tokenToUserId: tokenToUserId,
                 title: notificationData.title,
                 body: notificationData.body,
                 data: notificationData.data
@@ -139,6 +151,47 @@ class NotificationManager: ObservableObject {
         
         return users
     }
+  
+  /// Gets users who are currently within a specific zip code based on live location updates
+  private func getUsersCurrentlyInZipCode(_ zipCode: String, excludingUserId: String) async throws -> [UserProfile] {
+    print("[NotificationManager] Searching for users currently in zip code: \(zipCode), excluding user: \(excludingUserId)")
+    
+    let snapshot = try await db.collection("users")
+      .whereField("currentZipCode", isEqualTo: zipCode)
+      .getDocuments()
+    
+    let freshnessCutoff = Date().addingTimeInterval(-presenceFreshnessInterval)
+    var users: [UserProfile] = []
+    
+    for document in snapshot.documents {
+      let data = document.data()
+      let userId = document.documentID
+      
+      if userId == excludingUserId {
+        continue
+      }
+      
+      guard let fcmToken = data["fcmToken"] as? String, !fcmToken.isEmpty else {
+        continue
+      }
+      
+      if let timestamp = data["currentZipUpdatedAt"] as? Timestamp {
+        let updatedAt = timestamp.dateValue()
+        if updatedAt < freshnessCutoff {
+          continue
+        }
+      } else {
+        continue
+      }
+      
+      if let userProfile = UserProfile.fromFirestoreData(id: userId, data: data) {
+        users.append(userProfile)
+      }
+    }
+    
+    print("[NotificationManager] Found \(users.count) presence-based users in zip code \(zipCode)")
+    return users
+  }
     
     /// Creates notification payload for a pin
     private func createNotificationPayload(for pin: Pin) -> (title: String, body: String, data: [String: String]) {
@@ -162,7 +215,13 @@ class NotificationManager: ObservableObject {
     ///   - title: Notification title
     ///   - body: Notification body
     ///   - data: Additional data payload
-    private func sendPushNotification(to tokens: [String], title: String, body: String, data: [String: String]) async {
+    private func sendPushNotification(
+        to tokens: [String],
+        tokenToUserId: [String: String],
+        title: String,
+        body: String,
+        data: [String: String]
+    ) async {
         print("[NotificationManager] 🚀 Calling Cloud Function to notify \(tokens.count) OTHER users")
         print("[NotificationManager] 📝 Title: \(title)")
         print("[NotificationManager] 📝 Body: \(body)")
@@ -171,7 +230,8 @@ class NotificationManager: ObservableObject {
             "tokens": tokens,
             "title": title,
             "body": body,
-            "data": data
+            "data": data,
+            "tokenOwners": tokenToUserId
         ]
         
         do {
@@ -184,8 +244,15 @@ class NotificationManager: ObservableObject {
                 if let successCount = resultDict["successCount"] as? Int {
                     print("[NotificationManager] 📤 Sent to \(successCount) device(s)")
                 }
-                if let failureCount = resultDict["failureCount"] as? Int, failureCount > 0 {
+                if let failureCount = resultDict["failureCount"] as? Int,
+                   failureCount > 0,
+                   let responses = resultDict["responses"] as? [[String: Any]] {
                     print("[NotificationManager] ⚠️ Failed: \(failureCount) device(s)")
+                    await handleFailedTokens(responses: responses, tokenToUserId: tokenToUserId)
+                    
+                    if failureCount == tokens.count {
+                        await sendLocalTestNotification(forFailedPushWithTitle: title, body: body, data: data)
+                    }
                 }
             }
         } catch let error as NSError {
@@ -196,6 +263,44 @@ class NotificationManager: ObservableObject {
         } catch {
             print("[NotificationManager] ❌ Unknown error: \(error.localizedDescription)")
         }
+    }
+
+    private func handleFailedTokens(responses: [[String: Any]], tokenToUserId: [String: String]) async {
+        var tokensToRemove: [(token: String, userId: String)] = []
+        
+        for (index, response) in responses.enumerated() {
+            guard index < tokenToUserId.keys.count else { continue }
+
+            if let success = response["success"] as? Int, success == 1 {
+                continue
+            }
+            
+            if let errorMessage = response["error"] as? String,
+               errorMessage == "Requested entity was not found." {
+                let token = Array(tokenToUserId.keys)[index]
+                if let userId = tokenToUserId[token] {
+                    tokensToRemove.append((token, userId))
+                }
+            }
+        }
+        
+        guard !tokensToRemove.isEmpty else { return }
+        
+        do {
+            for entry in tokensToRemove {
+                try await db.collection("users").document(entry.userId).updateData([
+                    "fcmToken": FieldValue.delete()
+                ])
+                print("[NotificationManager] Removed stale FCM token for user \(entry.userId)")
+            }
+        } catch {
+            print("[NotificationManager] Error removing stale tokens: \(error.localizedDescription)")
+        }
+    }
+    
+    private func sendLocalTestNotification(forFailedPushWithTitle title: String, body: String, data: [String: String]) async {
+        print("[NotificationManager] All push attempts failed. Sending fallback local notification.")
+        await sendLocalNotification(title: title, body: body, data: data)
     }
     
     /// Sends a local notification for testing when no other users exist
@@ -295,6 +400,8 @@ extension IncidentType {
             return "Physical Incident"
         case .emergency:
             return "Emergency"
+        case .ice:
+            return "ICE Agents Reported"
         }
     }
 } 

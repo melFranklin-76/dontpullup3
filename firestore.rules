@@ -28,12 +28,17 @@ service cloud.firestore {
       // Allow authenticated users to read all pins
       allow read: if request.auth != null;
       
-      // Allow authenticated users to create pins with proper data
-      // Check that required fields exist (but allow additional fields)
+      // Allow authenticated users (but NOT anonymous) to create pins with proper data
+      // Check that required fields exist and validate coordinate bounds
       allow create: if request.auth != null
+        && request.auth.token.firebase.sign_in_provider != 'anonymous'
         && request.resource.data.userId == request.auth.uid
         && 'latitude' in request.resource.data
         && 'longitude' in request.resource.data
+        && request.resource.data.latitude >= -90 
+        && request.resource.data.latitude <= 90
+        && request.resource.data.longitude >= -180 
+        && request.resource.data.longitude <= 180
         && 'type' in request.resource.data
         && 'userId' in request.resource.data
         && 'timestamp' in request.resource.data;
@@ -56,6 +61,18 @@ service cloud.firestore {
       
       // Only admins can read reports (you'll need to implement admin checking)
       allow read: if false; // TODO: Add admin role checking
+    }
+    
+    // Zipcodes collection for organizing users by location (for notifications)
+    match /zipcodes/{zipCode}/users/{userId} {
+      // Allow authenticated users (including anonymous) to create/update their own entry
+      allow create, update: if request.auth != null && request.auth.uid == userId;
+      
+      // Allow authenticated users to read users in their zip code (for notifications)
+      allow read: if request.auth != null;
+      
+      // Allow listing users in a zip code for notification system
+      allow list: if request.auth != null;
     }
     
     // Helper function to get user's zip code

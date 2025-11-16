@@ -19,6 +19,7 @@ struct ContentGuidelinesView: View {
       ScrollViewReader { proxy in
         ScrollView {
           VStack(alignment: .leading, spacing: 20) {
+            Spacer().frame(height: 12)
             // Header
             VStack(spacing: 8) {
               Image(systemName: "shield.checkerboard")
@@ -74,8 +75,9 @@ struct ContentGuidelinesView: View {
                 .onTapGesture {
                   acceptedEmergencyDisclaimer.toggle()
                 }
-              }
-              .padding()
+          }
+          .padding(.horizontal, 20)
+          .padding(.vertical, 24)
             }
 
             // Recording Consent Guidelines
@@ -279,6 +281,7 @@ struct ContentGuidelinesView: View {
         hasScrolledToBottom = true
       }
     }
+    .dpuBackground()
   }
 }
 

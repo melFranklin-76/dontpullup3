@@ -10,9 +10,10 @@ class PremiumManager: ObservableObject {
   // Reference to AuthenticationManager for updating user profiles
   private let authManager = AuthenticationManager.shared
 
-  // Premium product identifier - would be defined in App Store Connect
-  // Note: Update this if the ID in App Store Connect is different
-  private let zipCodeUnlockProductID = "com.dontpullup.app.zipcode_upgrade"
+  // Premium product identifiers - must match App Store Connect product IDs
+  // IMPORTANT: These must be configured in App Store Connect before use
+  private let premiumUnlimitedProductID = "com.dontpullup.premium.unlimited"
+  private let zipCodeUnlockProductID = "com.dontpullup.zipcode.unlock"
 
   // Published properties for UI binding
   @Published var isLoading = false
@@ -22,6 +23,9 @@ class PremiumManager: ObservableObject {
 
   // Track if user is premium
   @Published var isPremium = false
+  
+  // Zip code being purchased (for individual zip code purchases)
+  @Published var zipCodeBeingPurchased: String?
 
   // Store transaction listener
   private var updateListenerTask: Task<Void, Error>?
@@ -59,7 +63,7 @@ class PremiumManager: ObservableObject {
 
     do {
       // Request products from the App Store using the new StoreKit 2 API
-      let storeProducts = try await Product.products(for: [zipCodeUnlockProductID])
+      let storeProducts = try await Product.products(for: [premiumUnlimitedProductID, zipCodeUnlockProductID])
 
       // Update the published products array on the main thread
       await MainActor.run {
@@ -123,12 +127,11 @@ class PremiumManager: ObservableObject {
   // MARK: - Purchase Flow
 
   // Use this to enable testing mode even on real devices during development
+  // Set to true to use test mode, false to use real App Store purchases
   private var forceTestMode: Bool {
-    #if DEBUG
-      return true  // Always use test mode in debug builds
-    #else
-      return false  // Use real IAP in release builds
-    #endif
+    // For testing premium features, set to true to simulate purchases
+    // For production testing, set to false to use real App Store
+    return true  // Currently using test mode for development
   }
 
   func purchasePremium() async {
@@ -140,13 +143,13 @@ class PremiumManager: ObservableObject {
 
     // Use test mode in simulator or when forced for testing
     if forceTestMode {
-      print("[PremiumManager] Using test mode - simulating successful purchase")
-      await simulatePurchaseForTesting()
+      print("[PremiumManager] Using test mode - simulating successful premium purchase")
+      await simulatePurchaseForTesting(isPremiumUnlimited: true)
       return
     }
 
-    guard let product = products.first(where: { $0.id == zipCodeUnlockProductID }) else {
-      print("[PremiumManager] Product not found - showing error")
+    guard let product = products.first(where: { $0.id == premiumUnlimitedProductID }) else {
+      print("[PremiumManager] Premium product not found - showing error")
       purchaseError = "Premium upgrade not available. Please try again later."
       return
     }
@@ -201,15 +204,89 @@ class PremiumManager: ObservableObject {
     }
   }
 
+  // Purchase individual zip code
+  func purchaseZipCode(_ zipCode: String) async {
+    print("[PremiumManager] Purchasing zip code: \(zipCode)")
+    
+    // Store the zip code being purchased
+    zipCodeBeingPurchased = zipCode
+    purchaseError = nil
+    
+    // Use test mode in simulator or when forced for testing
+    if forceTestMode {
+      print("[PremiumManager] Using test mode - simulating zip code purchase")
+      await simulatePurchaseForTesting(isPremiumUnlimited: false, zipCode: zipCode)
+      return
+    }
+    
+    guard let product = products.first(where: { $0.id == zipCodeUnlockProductID }) else {
+      print("[PremiumManager] Zip code product not found")
+      purchaseError = "Zip code unlock not available. Please try again later."
+      zipCodeBeingPurchased = nil
+      return
+    }
+    
+    do {
+      isLoading = true
+      
+      // Request a purchase from StoreKit
+      let result = try await product.purchase()
+      
+      // Process the result
+      switch result {
+      case .success(let verification):
+        let transaction: StoreKit.Transaction
+        switch verification {
+        case .verified(let verifiedTransaction):
+          transaction = verifiedTransaction
+        case .unverified:
+          throw StoreError.failedVerification
+        }
+        
+        // Add the zip code to user's purchased list
+        if let zipCode = zipCodeBeingPurchased {
+          await addPurchasedZipCode(zipCode)
+        }
+        
+        // Finish the transaction
+        await transaction.finish()
+        
+        print("[PremiumManager] Zip code purchase successful")
+        zipCodeBeingPurchased = nil
+        
+      case .userCancelled:
+        print("[PremiumManager] User cancelled zip code purchase")
+        isLoading = false
+        zipCodeBeingPurchased = nil
+        
+      case .pending:
+        print("[PremiumManager] Zip code purchase pending approval")
+        purchaseError = "Purchase is pending approval."
+        isLoading = false
+        
+      @unknown default:
+        print("[PremiumManager] Unknown purchase result")
+        purchaseError = "Unknown purchase result. Please try again."
+        isLoading = false
+        zipCodeBeingPurchased = nil
+      }
+    } catch {
+      print("[PremiumManager] Zip code purchase failed: \(error.localizedDescription)")
+      purchaseError = "Purchase failed: \(error.localizedDescription)"
+      isLoading = false
+      zipCodeBeingPurchased = nil
+    }
+  }
+  
   // Special method to simulate purchases in simulator
-  func simulatePurchaseForTesting() async {
-    print("[PremiumManager] Starting simulated purchase flow")
+  func simulatePurchaseForTesting(isPremiumUnlimited: Bool, zipCode: String? = nil) async {
+    print("[PremiumManager] Starting simulated purchase flow - Premium: \(isPremiumUnlimited), ZipCode: \(zipCode ?? "none")")
     isLoading = true
 
     // Reset error state first
     purchaseError = nil
 
-    // Check if user is signed in - fix unused variable warning
+    // Check if user is signed in
     if Auth.auth().currentUser == nil {
       print("[PremiumManager] No user logged in during simulation")
       purchaseError = "Error: You must be signed in to make purchases"
@@ -222,7 +299,6 @@ class PremiumManager: ObservableObject {
     do {
       try await Task.sleep(nanoseconds: 1_000_000_000)  // 1 second
     } catch {
-      // This catch block is needed because Task.sleep can throw if the task is cancelled
       print("[PremiumManager] Simulated purchase was interrupted")
       isLoading = false
       return
@@ -230,8 +306,12 @@ class PremiumManager: ObservableObject {
 
     print("[PremiumManager] Simulated purchase completed")
 
-    // For simulator testing, call the real update function
-    await updateUserPremiumStatus()
+    // For simulator testing, call the appropriate update function
+    if isPremiumUnlimited {
+      await updateUserPremiumStatus()
+    } else if let zipCode = zipCode {
+      await addPurchasedZipCode(zipCode)
+    }
 
     // Print current state for debugging
     print(
@@ -356,6 +436,7 @@ class PremiumManager: ObservableObject {
           "lastActive": FieldValue.serverTimestamp(),
           "zipCode": UserDefaults.standard.string(forKey: "userZipCode") ?? "",
           "originalZipCode": UserDefaults.standard.string(forKey: "userZipCode") ?? "",
+          "purchasedZipCodes": [],
         ])
         print("[PremiumManager] Created new user document with premium status")
       }
@@ -379,6 +460,56 @@ class PremiumManager: ObservableObject {
     } catch {
       print("[PremiumManager] Error updating user premium status: \(error.localizedDescription)")
       purchaseError = "Failed to update premium status: \(error.localizedDescription)"
+      isLoading = false
+    }
+  }
+  
+  // Add a purchased zip code to user's profile
+  private func addPurchasedZipCode(_ zipCode: String) async {
+    guard let currentUser = Auth.auth().currentUser else {
+      print("[PremiumManager] No user logged in")
+      purchaseError = "Error: You must be signed in"
+      isLoading = false
+      return
+    }
+    
+    let db = Firestore.firestore()
+    let userRef = db.collection("users").document(currentUser.uid)
+    
+    do {
+      // Get current user profile
+      let docSnapshot = try await userRef.getDocument()
+      var currentZipCodes: [String] = []
+      
+      if let data = docSnapshot.data(),
+         let existing = data["purchasedZipCodes"] as? [String] {
+        currentZipCodes = existing
+      }
+      
+      // Add the new zip code if not already present
+      if !currentZipCodes.contains(zipCode) {
+        currentZipCodes.append(zipCode)
+        
+        try await userRef.updateData(["purchasedZipCodes": currentZipCodes])
+        print("[PremiumManager] Added zip code \(zipCode) to user's purchased list")
+      }
+      
+      // Update local state
+      purchaseSuccess = true
+      isLoading = false
+      
+      // Reload user profile by fetching from Firestore
+      // Trigger a profile reload via notification
+      NotificationCenter.default.post(
+        name: Notification.Name("ReloadUserProfile"), object: nil)
+      
+      // Post notification
+      NotificationCenter.default.post(
+        name: Notification.Name("UserZipCodePurchased"), object: zipCode)
+      
+    } catch {
+      print("[PremiumManager] Error adding purchased zip code: \(error.localizedDescription)")
+      purchaseError = "Failed to unlock zip code: \(error.localizedDescription)"
       isLoading = false
     }
   }

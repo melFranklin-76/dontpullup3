@@ -222,6 +222,106 @@ extension View {
   }
 }
 
+// MARK: - Modern Background & Glass Utilities
+
+struct DPUBackgroundView: View {
+  var body: some View {
+    ZStack {
+      DPUTheme.colors.backgroundGradient
+      RadialGradient(
+        colors: [
+          DPUTheme.colors.neonPurple.opacity(0.3),
+          Color.clear,
+        ],
+        center: .topLeading,
+        startRadius: 80,
+        endRadius: 400
+      )
+      .blur(radius: 50)
+
+      LinearGradient(
+        colors: [
+          Color.white.opacity(0.08),
+          Color.clear,
+        ],
+        startPoint: .top,
+        endPoint: .bottom
+      )
+    }
+    .ignoresSafeArea()
+  }
+}
+
+private struct DPUBackgroundModifier: ViewModifier {
+  let edges: Edge.Set
+
+  func body(content: Content) -> some View {
+    ZStack {
+      DPUBackgroundView()
+        .ignoresSafeArea(edges: edges)
+      content
+    }
+  }
+}
+
+extension View {
+  /// Applies the shared Don't Pull Up gradient background behind the view hierarchy.
+  func dpuBackground(ignoresSafeAreaEdges edges: Edge.Set = .all) -> some View {
+    modifier(DPUBackgroundModifier(edges: edges))
+  }
+}
+
+// Shared glass background used by cards and rows.
+struct GlassCardBackground: View {
+  var cornerRadius: CGFloat
+  var tint: Color
+
+  var body: some View {
+    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+      .fill(.ultraThinMaterial)
+      .overlay(
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+          .stroke(DPUTheme.colors.borderHighlight, lineWidth: 0.8)
+          .blendMode(.overlay)
+      )
+      .background(
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+          .fill(tint.opacity(0.35))
+          .blur(radius: 25)
+      )
+  }
+}
+
+// Reusable container styling for glass-like modal sheets
+private struct GlassSheetModifier: ViewModifier {
+  var maxWidth: CGFloat = 540
+  var cornerRadius: CGFloat = 28
+
+  func body(content: Content) -> some View {
+    content
+      .padding(24)
+      .frame(maxWidth: maxWidth, alignment: .leading)
+      .background(
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+          .fill(.ultraThinMaterial)
+          .overlay(
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+              .stroke(DPUTheme.colors.borderHighlight, lineWidth: 1)
+              .blendMode(.overlay)
+          )
+          .shadow(color: DPUTheme.colors.cardShadow.opacity(0.6), radius: 30, x: 0, y: 15)
+      )
+      .padding(.horizontal, 24)
+      .padding(.vertical, 40)
+  }
+}
+
+extension View {
+  func glassSheetStyle(maxWidth: CGFloat = 540) -> some View {
+    modifier(GlassSheetModifier(maxWidth: maxWidth))
+  }
+}
+
 // MARK: - Shared Cards and Components
 
 /// A reusable card view with consistent styling
@@ -251,11 +351,176 @@ struct DPUCard<Content: View>: View {
     VStack(alignment: .leading, spacing: 0) {
       content
     }
-    .padding()
-    .background(backgroundColor)
-    .cornerRadius(cornerRadius)
+    .padding(20)
+    .background(
+      GlassCardBackground(cornerRadius: cornerRadius, tint: backgroundColor)
+    )
+    .padding(.horizontal, 2)
     .if(useShadow) { view in
-      view.shadow(color: .black.opacity(0.3), radius: 2, x: 0, y: 2)
+      view.shadow(color: DPUTheme.colors.cardShadow, radius: 15, x: 0, y: 10)
+    }
+  }
+}
+
+// Modern glassmorphism card with enhanced visual effects
+struct ModernDPUCard<Content: View>: View {
+  var content: Content
+  var cornerRadius: CGFloat = 16
+  var useShadow: Bool = true
+
+  init(@ViewBuilder content: () -> Content) {
+    self.content = content()
+  }
+
+  var body: some View {
+    ZStack {
+      // Modern glassmorphism effect
+      RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        .fill(.ultraThinMaterial)
+        .overlay(
+          RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .strokeBorder(DPUTheme.colors.accentGradient, lineWidth: 1.2)
+        )
+        .background(
+          RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .fill(DPUTheme.colors.neonPurple.opacity(0.18))
+            .blur(radius: 30)
+        )
+        .if(useShadow) { view in
+          view.shadow(color: DPUTheme.colors.cardShadow, radius: 18, x: 0, y: 12)
+        }
+
+      VStack(alignment: .leading, spacing: 0) {
+        content
+      }
+      .padding(22)
+    }
+    .padding(.horizontal, 4)
+  }
+}
+
+// Enhanced toggle with haptic feedback and animations
+struct EnhancedToggle: View {
+  @Binding var isOn: Bool
+  let label: String
+  let description: String?
+
+  init(isOn: Binding<Bool>, label: String, description: String? = nil) {
+    self._isOn = isOn
+    self.label = label
+    self.description = description
+  }
+
+  var body: some View {
+    Toggle(isOn: $isOn.animation(.spring(response: 0.3, dampingFraction: 0.7))) {
+      VStack(alignment: .leading, spacing: 4) {
+        Text(label)
+          .foregroundColor(DPUTheme.colors.lightGray)
+          .font(.body.weight(.semibold))
+        if let description = description {
+          Text(description)
+            .foregroundColor(DPUTheme.colors.mutedGray)
+            .font(.caption)
+        }
+      }
+    }
+    .toggleStyle(SwitchToggleStyle(tint: DPUTheme.colors.electricBlue))
+    .padding(.vertical, 10)
+    .padding(.horizontal, 12)
+    .background(
+      RoundedRectangle(cornerRadius: 16, style: .continuous)
+        .fill(Color.white.opacity(0.02))
+        .overlay(
+          RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .stroke(Color.white.opacity(0.06), lineWidth: 1)
+        )
+    )
+    .onChange(of: isOn) { _ in
+      // Haptic feedback
+      UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+  }
+}
+
+// Modern button with enhanced styling
+struct ModernButton: View {
+  let title: String
+  let systemImage: String?
+  let style: ButtonStyle
+  let action: () -> Void
+
+  enum ButtonStyle {
+    case primary, secondary, destructive, success
+  }
+
+  var body: some View {
+    Button(action: {
+      UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+      action()
+    }) {
+      HStack(spacing: 8) {
+        if let image = systemImage {
+          Image(systemName: image)
+            .font(.system(size: 16, weight: .semibold))
+        }
+        Text(title)
+          .font(.system(.subheadline, design: .rounded).weight(.semibold))
+      }
+      .frame(maxWidth: .infinity)
+      .frame(height: 50)
+      .background(buttonBackground)
+      .foregroundColor(buttonForeground)
+      .clipShape(RoundedRectangle(cornerRadius: 12))
+      .overlay(
+        RoundedRectangle(cornerRadius: 12)
+          .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
+      )
+      .shadow(color: shadowColor, radius: 5, x: 0, y: 3)
+    }
+  }
+
+  @ViewBuilder
+  private var buttonBackground: some View {
+    switch style {
+    case .primary:
+      DPUTheme.colors.accentGradient
+    case .secondary:
+      Color.white.opacity(0.08)
+        .overlay(DPUTheme.colors.glassHighlightGradient)
+    case .destructive:
+      LinearGradient(
+        colors: [DPUTheme.colors.alertRed, Color.red.opacity(0.6)],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+      )
+    case .success:
+      LinearGradient(
+        colors: [Color.green, DPUTheme.colors.aquaTeal],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+      )
+    }
+  }
+
+  private var buttonForeground: Color {
+    switch style {
+    case .primary, .destructive, .success:
+      return .white
+    case .secondary:
+      return DPUTheme.colors.lightGray
+    }
+  }
+
+  private var shadowColor: Color {
+    switch style {
+    case .primary:
+      return DPUTheme.colors.electricBlue.opacity(0.35)
+    case .destructive:
+      return DPUTheme.colors.alertRed.opacity(0.35)
+    case .success:
+      return DPUTheme.colors.aquaTeal.opacity(0.35)
+    case .secondary:
+      return Color.black.opacity(0.25)
     }
   }
 }
@@ -279,12 +544,19 @@ struct DPUSectionHeader: View {
   var title: String
 
   var body: some View {
-    Text(title)
-      .foregroundColor(.white)
-      .font(.headline)
-      .frame(maxWidth: .infinity, alignment: .leading)
-      .padding(.top, 16)
-      .padding(.bottom, 8)
+    VStack(alignment: .leading, spacing: 4) {
+      Text(title.uppercased())
+        .font(.caption2.weight(.semibold))
+        .kerning(1.2)
+        .foregroundStyle(DPUTheme.colors.accentGradient)
+
+      Rectangle()
+        .fill(DPUTheme.colors.subtleSeparator)
+        .frame(height: 1)
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(.top, 12)
+    .padding(.bottom, 4)
   }
 }
 

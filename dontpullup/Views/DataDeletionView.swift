@@ -19,6 +19,7 @@ struct DataDeletionView: View {
     NavigationView {
       ScrollView(.vertical, showsIndicators: true) {
         VStack(spacing: 24) {
+          Spacer().frame(height: 12)
           // Warning header
           VStack(spacing: 16) {
             Image(systemName: "exclamationmark.triangle.fill")
@@ -168,7 +169,8 @@ struct DataDeletionView: View {
             .padding()
           }
         }
-        .padding(.horizontal)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 24)
       }
       .navigationTitle("Delete Data")
       .navigationBarTitleDisplayMode(.inline)
@@ -180,6 +182,7 @@ struct DataDeletionView: View {
           .disabled(isDeleting)
       )
     }
+    .dpuBackground()
     .alert("Data Deleted Successfully", isPresented: $showSuccess) {
       Button("OK") {
         // Sign out and close

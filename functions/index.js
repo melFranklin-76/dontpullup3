@@ -18,6 +18,7 @@ exports.sendIncidentNotification = functions.https.onCall(async (request, contex
   const title = data.title;
   const body = data.body;
   const payloadData = data.data;
+  const tokenOwners = data.tokenOwners || {};
   
   console.log("Tokens:", tokens ? tokens.length : 0);
   console.log("Title:", title);
@@ -60,11 +61,26 @@ exports.sendIncidentNotification = functions.https.onCall(async (request, contex
     console.log("SUCCESS! Sent:", response.successCount, "Failed:", response.failureCount);
     
     if (response.failureCount > 0) {
+      const cleanupPromises = [];
       response.responses.forEach((resp, idx) => {
         if (!resp.success) {
-          console.error("Failed token", idx, ":", resp.error);
+          const token = tokens[idx];
+          console.error("Failed token", idx, token, ":", resp.error);
+          const ownerId = tokenOwners[token];
+          if (ownerId) {
+            const promise = admin.firestore()
+              .collection("users")
+              .doc(ownerId)
+              .update({
+                fcmToken: admin.firestore.FieldValue.delete(),
+              })
+              .then(() => console.log("Cleared invalid token for user", ownerId))
+              .catch((err) => console.error("Failed to clear token for user", ownerId, err));
+            cleanupPromises.push(promise);
+          }
         }
       });
+      await Promise.allSettled(cleanupPromises);
     }
     
     return {

@@ -12,6 +12,7 @@ struct HelpView: View {
     NavigationView {
       NoBounceScrollView {
         VStack(spacing: 24) {
+          Spacer().frame(height: 8)
           // Title with clear spacing
           Text("Help & Resources")
             .font(.title2)
@@ -116,7 +117,8 @@ struct HelpView: View {
           }
           .padding(.horizontal, 24)
         }
-        .padding(.top, 16)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 24)
       }
       // Add Navigation Bar items
       .navigationBarTitleDisplayMode(.inline)
@@ -129,6 +131,7 @@ struct HelpView: View {
       )
     }
     .navigationViewStyle(.stack)  // Use stack style for modal presentation
+    .dpuBackground()
     .preferredColorScheme(.dark)  // Ensure dark mode for the NavigationView itself
     // Sheets for presenting modal views
     .sheet(isPresented: $showingSettings) {
@@ -178,9 +181,10 @@ struct HelpView: View {
       .padding(.vertical, 16)  // Increased vertical padding for better touch targets
       .padding(.horizontal, 20)  // Consistent horizontal padding
       .frame(maxWidth: .infinity)
-      .background(Color.black.opacity(0.5))
-      .foregroundColor(.white)
-      .cornerRadius(10)
+      .background(
+        GlassCardBackground(cornerRadius: 18, tint: Color.black.opacity(0.5))
+      )
+      .foregroundColor(DPUTheme.colors.lightGray)
     }
   }
 }

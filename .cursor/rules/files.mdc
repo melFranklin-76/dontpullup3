@@ -73,3 +73,8 @@ If found, propose updating the existing file instead of creating a duplicate.
 
 Save this file under the project root as cursor_context.md and include it in every request to Cursor.ai to provide accurate context and avoid duplication.
 
+6. Known Benign Warnings
+
+- Ignore the console warning `Failed to locate resource named "default.csv"`—it is expected in current builds.
+- Ignore Xcode’s `empty dSYM file detected` warning for `Dontpullup.app`; the build intentionally omits debug info.
+

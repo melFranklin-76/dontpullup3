@@ -52,47 +52,107 @@ struct PremiumView: View {
           .foregroundColor(.white)
 
         // Subtitle
-        Text("Unlock full access to incidents across all zip codes")
+        Text("Choose your access level")
           .font(.headline)
           .foregroundColor(.white.opacity(0.8))
           .multilineTextAlignment(.center)
           .padding(.horizontal, 20)
           .padding(.bottom, 10)
 
-        // Features list with improved styling
-        VStack(alignment: .leading, spacing: 18) {
-          PremiumFeatureRow(icon: "mappin.and.ellipse", text: "View incidents from any location")
-          PremiumFeatureRow(icon: "mappin.circle", text: "Change your zip code anytime")
-          PremiumFeatureRow(icon: "bell", text: "Get notifications from multiple areas")
-          PremiumFeatureRow(icon: "dollarsign.circle", text: "One-time purchase, no subscription")
+        // Option 1: Individual Zip Codes
+        VStack(spacing: 16) {
+          Text("Option 1: Individual Areas")
+            .font(.title3)
+            .fontWeight(.semibold)
+            .foregroundColor(.blue)
+
+          ZStack {
+            RoundedRectangle(cornerRadius: 16)
+              .fill(Color.blue.opacity(0.1))
+              .overlay(
+                RoundedRectangle(cornerRadius: 16)
+                  .stroke(Color.blue.opacity(0.3), lineWidth: 1)
+              )
+
+            VStack(alignment: .leading, spacing: 12) {
+              PremiumFeatureRow(icon: "map.fill", text: "Unlock specific zip codes")
+              PremiumFeatureRow(icon: "dollarsign.circle", text: "$0.99 per zip code")
+              PremiumFeatureRow(icon: "checkmark.circle", text: "One-time purchase, keep forever")
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
+          }
+          .padding(.horizontal, 20)
+
+          ModernButton(
+            title: "Unlock Zip Codes",
+            systemImage: "map.fill",
+            style: .primary
+          ) {
+            // Show zip code purchase view
+            NotificationCenter.default.post(name: NSNotification.Name("ShowZipCodePurchase"), object: nil)
+            dismiss()
+          }
+          .padding(.horizontal, 20)
         }
-        .padding(.horizontal, 30)
-        .padding(.vertical, 15)
-        .background(Color.black.opacity(0.3))
-        .cornerRadius(16)
-        .padding(.horizontal, 20)
+        .padding(.bottom, 20)
+        
+        // Divider
+        Text("OR")
+          .font(.headline)
+          .foregroundColor(.gray)
+        
+        // Option 2: Premium Unlimited
+        VStack(spacing: 16) {
+          Text("Option 2: Premium Unlimited")
+            .font(.title3)
+            .fontWeight(.semibold)
+            .foregroundColor(.yellow)
+
+          ZStack {
+            RoundedRectangle(cornerRadius: 16)
+              .fill(Color.yellow.opacity(0.1))
+              .overlay(
+                RoundedRectangle(cornerRadius: 16)
+                  .stroke(Color.yellow.opacity(0.3), lineWidth: 1)
+              )
+
+            VStack(alignment: .leading, spacing: 12) {
+              PremiumFeatureRow(icon: "mappin.and.ellipse", text: "Watch videos from ALL areas")
+              PremiumFeatureRow(icon: "mappin.circle", text: "Change your zip code anytime")
+              PremiumFeatureRow(icon: "bell", text: "Notifications from multiple areas")
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
+          }
+          .padding(.horizontal, 20)
+        }
 
         Spacer()
 
-        // Price display
+        // Price display for premium unlimited
         Group {
-          if let product = premiumManager.products.first {
-            Text("Unlock Premium for \(product.displayPrice)")
-              .font(.headline)
-              .foregroundColor(.white)
-              .padding(.bottom, 5)
+          if let product = premiumManager.products.first(where: { $0.id == "com.dontpullup.app.premium_unlimited" }) {
+            Text("\(product.displayPrice)")
+              .font(.title2)
+              .fontWeight(.bold)
+              .foregroundColor(.yellow)
           } else {
             #if DEBUG
-              Text("Unlock Premium for $0.99")
-                .font(.headline)
-                .foregroundColor(.white)
-                .padding(.bottom, 5)
+              Text("$4.99")
+                .font(.title2)
+                .fontWeight(.bold)
+                .foregroundColor(.yellow)
             #endif
           }
         }
 
-        // Purchase button with improved styling
-        Button(action: {
+        // Purchase button with modern styling
+        ModernButton(
+          title: premiumManager.isLoading ? "Processing..." : "Upgrade Now",
+          systemImage: premiumManager.isLoading ? nil : "star.fill",
+          style: .success
+        ) {
           print("[PremiumView] Purchase button tapped")
           Task {
             if let currentUser = Auth.auth().currentUser, !currentUser.isAnonymous {
@@ -105,30 +165,6 @@ struct PremiumView: View {
               showAlert = true
             }
           }
-        }) {
-          HStack {
-            if premiumManager.isLoading {
-              ProgressView()
-                .progressViewStyle(CircularProgressViewStyle(tint: .black))
-                .scaleEffect(1.2)
-            } else {
-              Text("Upgrade Now")
-                .fontWeight(.bold)
-                .font(.title3)
-            }
-          }
-          .frame(maxWidth: .infinity)
-          .frame(height: 56)
-          .background(
-            LinearGradient(
-              gradient: Gradient(colors: [Color.yellow, Color.yellow.opacity(0.8)]),
-              startPoint: .top,
-              endPoint: .bottom
-            )
-          )
-          .foregroundColor(.black)
-          .cornerRadius(16)
-          .shadow(color: Color.yellow.opacity(0.5), radius: 5)
         }
         .padding(.horizontal, 20)
         .disabled(premiumManager.isLoading || premiumManager.isPremium)
@@ -140,16 +176,17 @@ struct PremiumView: View {
             .padding(.top, 10)
         }
 
-        // Restore button with improved styling
-        Button(action: {
+        // Restore button with modern styling
+        ModernButton(
+          title: "Restore Purchases",
+          systemImage: "arrow.clockwise",
+          style: .secondary
+        ) {
           Task {
             await premiumManager.restorePurchases()
           }
-        }) {
-          Text("Restore Purchases")
-            .foregroundColor(.blue)
-            .padding(.vertical, 10)
         }
+        .padding(.horizontal, 20)
         .padding(.bottom, 20)
         .disabled(premiumManager.isLoading)
 
@@ -181,16 +218,12 @@ struct PremiumView: View {
                 .font(.headline)
                 .foregroundColor(.white.opacity(0.8))
 
-              Button(action: {
+              ModernButton(
+                title: "Continue",
+                systemImage: "checkmark",
+                style: .success
+              ) {
                 dismiss()
-              }) {
-                Text("Continue")
-                  .fontWeight(.bold)
-                  .frame(maxWidth: .infinity)
-                  .frame(height: 56)
-                  .background(Color.green)
-                  .foregroundColor(.white)
-                  .cornerRadius(16)
               }
               .padding(.horizontal, 40)
               .padding(.top, 20)

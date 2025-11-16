@@ -19,117 +19,120 @@ struct ReportFlowView: View {
   @State private var showingVideoPicker = false
 
   var body: some View {
-    NavigationView {
-      VStack {
-        // Title with step indicator
-        HStack {
-          Text("Report Incident")
-            .font(.headline)
+    ZStack {
+      ScrollView(.vertical, showsIndicators: false) {
+        VStack(alignment: .leading, spacing: 24) {
+          HStack(alignment: .center) {
+            VStack(alignment: .leading, spacing: 4) {
+              Text("Report Incident")
+                .font(.system(size: 28, weight: .bold, design: .rounded))
+                .foregroundColor(DPUTheme.colors.lightGray)
 
-          Spacer()
+              Text("Complete the steps below to submit a detailed report.")
+                .font(.subheadline)
+                .foregroundColor(DPUTheme.colors.mutedGray)
+            }
 
-          // Step indicators (1-2-3)
-          HStack(spacing: 4) {
-            ForEach(ReportStep.allCases, id: \.self) { step in
-              Circle()
-                .fill(viewModel.reportStep == step ? DPUTheme.colors.alertRed : Color.gray)
-                .frame(width: 8, height: 8)
+            Spacer()
+
+            HStack(spacing: 4) {
+              ForEach(ReportStep.allCases, id: \.self) { step in
+                Circle()
+                  .fill(viewModel.reportStep == step ? DPUTheme.colors.alertRed : DPUTheme.colors.subtleSeparator)
+                  .frame(width: 10, height: 10)
+              }
             }
           }
-        }
-        .padding()
-
-        // Dynamic content based on current step
-        if let currentStep = viewModel.reportStep {
-          switch currentStep {
-          case .type:
-            IncidentTypeSelectionView(viewModel: viewModel)
-          case .video:
-            VideoRecordingView(
-              viewModel: viewModel,
-              isRecording: $isRecording,
-              recorder: $recorder,
-              videoURL: $videoURL,
-              recordingDuration: $recordingDuration,
-              showCamera: $showCamera,
-              showingVideoPicker: $showingVideoPicker
-            )
-          case .confirm:
-            ConfirmReportView(viewModel: viewModel)
-          }
-        }
-
-        Spacer()
-
-        // Navigation buttons
-        HStack {
-          Button("Cancel") {
-            viewModel.reportStep = nil
-          }
-          .buttonStyle(SecondaryButtonStyle())
-
-          Spacer()
 
           if let currentStep = viewModel.reportStep {
-            // Next/Back buttons based on current step
             switch currentStep {
             case .type:
-              Button("Next") {
-                viewModel.reportStep = .video
-              }
-              .buttonStyle(PrimaryButtonStyle())
-            // We're using a default value in PinDraft init so this is always valid
-
+              IncidentTypeSelectionView(viewModel: viewModel)
             case .video:
-              HStack {
-                Button("Back") {
-                  viewModel.reportStep = .type
-                }
-                .buttonStyle(SecondaryButtonStyle())
-
-                Button("Next") {
-                  viewModel.reportStep = .confirm
-                }
-                .buttonStyle(PrimaryButtonStyle())
-                // No need to disable - can always proceed with or without video
-              }
-
+              VideoRecordingView(
+                viewModel: viewModel,
+                isRecording: $isRecording,
+                recorder: $recorder,
+                videoURL: $videoURL,
+                recordingDuration: $recordingDuration,
+                showCamera: $showCamera,
+                showingVideoPicker: $showingVideoPicker
+              )
             case .confirm:
-              HStack {
-                Button("Back") {
-                  viewModel.reportStep = .video
-                }
-                .buttonStyle(SecondaryButtonStyle())
+              ConfirmReportView(viewModel: viewModel)
+            }
+          }
 
-                Button("Submit") {
-                  Task {
-                    // Update video URL in draft
-                    viewModel.reportDraft.videoURL = videoURL
-                    await viewModel.upload(draft: viewModel.reportDraft)
-                  }
-                }
-                .buttonStyle(PrimaryButtonStyle())
+          Divider()
+            .background(DPUTheme.colors.subtleSeparator)
+
+          if let currentStep = viewModel.reportStep {
+            HStack(spacing: 12) {
+              Button("Cancel") {
+                viewModel.reportStep = nil
               }
+              .buttonStyle(SecondaryButtonStyle())
+
+              Spacer()
+
+              controls(for: currentStep)
             }
           }
         }
-        .padding()
-      }
-      .navigationBarTitle("", displayMode: .inline)
-      .navigationBarHidden(true)
-      .background(DPUTheme.colors.darkBlack)
-      .foregroundColor(DPUTheme.colors.lightGray)
-      .sheet(isPresented: $showingVideoPicker) {
-        VideoPicker(
-          onVideoPicked: { selectedVideoURL in
-            if let url = selectedVideoURL {
-              videoURL = url
-              print("[ReportFlow] Video selected: \(url)")
-            }
-          }, viewModel: viewModel)
+        .glassSheetStyle()
       }
     }
+    .dpuBackground()
     .preferredColorScheme(.dark)
+    .sheet(isPresented: $showingVideoPicker) {
+      VideoPicker(
+        onVideoPicked: { selectedVideoURL in
+          if let url = selectedVideoURL {
+            videoURL = url
+            print("[ReportFlow] Video selected: \(url)")
+          }
+        }, viewModel: viewModel)
+    }
+  }
+
+  @ViewBuilder
+  private func controls(for step: ReportStep) -> some View {
+    switch step {
+    case .type:
+      Button("Next") {
+        viewModel.reportStep = .video
+      }
+      .buttonStyle(PrimaryButtonStyle())
+
+    case .video:
+      HStack(spacing: 12) {
+        Button("Back") {
+          viewModel.reportStep = .type
+        }
+        .buttonStyle(SecondaryButtonStyle())
+
+        Button("Next") {
+          viewModel.reportStep = .confirm
+        }
+        .buttonStyle(PrimaryButtonStyle())
+      }
+
+    case .confirm:
+      HStack(spacing: 12) {
+        Button("Back") {
+          viewModel.reportStep = .video
+        }
+        .buttonStyle(SecondaryButtonStyle())
+
+        Button("Submit") {
+          Task {
+            viewModel.reportDraft.videoURL = videoURL
+            await viewModel.upload(draft: viewModel.reportDraft)
+          }
+        }
+        .buttonStyle(PrimaryButtonStyle())
+      }
+    }
   }
 }
 

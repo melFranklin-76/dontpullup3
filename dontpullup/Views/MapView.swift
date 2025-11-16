@@ -99,7 +99,6 @@ struct MapView: UIViewRepresentable {
 
   private func configureMapView(_ mapView: MKMapView) {
     // Configure base appearance with standard settings that don't require external style files
-    mapView.mapType = .standard
     mapView.showsUserLocation = true
     mapView.showsBuildings = true
     mapView.showsTraffic = false
@@ -123,7 +122,49 @@ struct MapView: UIViewRepresentable {
     )
     mapView.setRegion(defaultRegion, animated: false)
 
+    applyDisplayStyle(mapView)
+
+    #if DEBUG
     print("DEBUG: MapView configured with mapType: \(mapView.mapType.rawValue)")
+    #endif
+  }
+
+  private func applyDisplayStyle(_ mapView: MKMapView) {
+    let style = viewModel.mapDisplayStyle
+
+    if mapView.mapType != style.mapType {
+      mapView.mapType = style.mapType
+    }
+
+    mapView.showsBuildings = style.showsBuildings
+    mapView.showsTraffic = style.showsTraffic
+    mapView.isPitchEnabled = style.allowsPitch
+    mapView.overrideUserInterfaceStyle = .dark
+
+    let camera = mapView.camera
+    
+    let targetPitch = style.preferredPitch
+    var cameraNeedsUpdate = false
+
+    if style.allowsPitch {
+      if abs(Double(camera.pitch) - Double(targetPitch)) > 1 {
+        camera.pitch = targetPitch
+        cameraNeedsUpdate = true
+      }
+
+      let targetAltitude = style.preferredAltitude
+      if abs(camera.altitude - targetAltitude) > 5 {
+        camera.altitude = targetAltitude
+        cameraNeedsUpdate = true
+      }
+    } else if abs(Double(camera.pitch) - Double(targetPitch)) > 1 {
+      camera.pitch = targetPitch
+      cameraNeedsUpdate = true
+    }
+
+    if cameraNeedsUpdate {
+      mapView.setCamera(camera, animated: true)
+    }
   }
 
   // Safe method to disable debug overlays via UserDefaults only
@@ -160,8 +201,23 @@ struct MapView: UIViewRepresentable {
   }
 
   func updateUIView(_ view: MKMapView, context: Context) {
-    // Handle region changes
-    if let mapRegion = viewModel.mapRegion {
+    applyDisplayStyle(view)
+
+    // Handle user tracking mode changes
+    if viewModel.isTrackingUserLocation {
+      // Enable user tracking mode to follow the user like a navigation app
+      if view.userTrackingMode != .follow {
+        view.setUserTrackingMode(.follow, animated: true)
+      }
+    } else {
+      // Disable user tracking mode when not tracking
+      if view.userTrackingMode != .none {
+        view.setUserTrackingMode(.none, animated: true)
+      }
+    }
+
+    // Handle region changes (only when not in tracking mode)
+    if !viewModel.isTrackingUserLocation, let mapRegion = viewModel.mapRegion {
       view.setRegion(mapRegion, animated: true)
       // Reset mapRegion to nil after applying it to avoid reapplying the same region
       DispatchQueue.main.async {
@@ -193,14 +249,6 @@ struct MapView: UIViewRepresentable {
 
   // Helper function to update pins on the map
   private func updatePins(on mapView: MKMapView) {
-    // Update map type with animation if needed
-    if mapView.mapType != viewModel.mapType {
-      UIView.animate(withDuration: 0.3) {
-        mapView.mapType = viewModel.mapType
-        mapView.overrideUserInterfaceStyle = .dark
-      }
-    }
-
     // Ensure user location is always shown
     if !mapView.showsUserLocation {
       mapView.showsUserLocation = true
@@ -285,22 +333,30 @@ class Coordinator: NSObject, MKMapViewDelegate {
   }
 
   @objc func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
+    #if DEBUG
     print("[MapView] Long press detected - state: \(gesture.state.rawValue)")
+    #endif
 
     // Respond to long-press only when NOT in delete-edit mode
     guard gesture.state == .began else {
+      #if DEBUG
       print("[MapView] Long press ignored - wrong state")
+      #endif
       return
     }
 
     guard parent.viewModel.isEditMode == false else {
+      #if DEBUG
       print("[MapView] Long press ignored - in edit mode")
+      #endif
       return
     }
 
     // Check if user is anonymous first
     if parent.viewModel.authState.isAnonymous {
+      #if DEBUG
       print("[MapView] Long press blocked - user is anonymous")
+      #endif
       parent.viewModel.showError("Guests cannot drop new pins.")
       return
     }
@@ -309,20 +365,26 @@ class Coordinator: NSObject, MKMapViewDelegate {
     let coordinate = (gesture.view as? MKMapView)?.convert(point, toCoordinateFrom: gesture.view)
 
     guard let validCoordinate = coordinate else {
+      #if DEBUG
       print("[MapView] Long press failed - invalid coordinate")
+      #endif
       return
     }
 
     // Check authentication first
     guard Auth.auth().currentUser != nil else {
+      #if DEBUG
       print("[MapView] Long press blocked - no current user")
+      #endif
       parent.viewModel.showError("You need to sign in to drop pins")
       return
     }
 
+    #if DEBUG
     print(
       "[MapView] Long press successful - calling handleLocationAction with coordinate: \(validCoordinate)"
     )
+    #endif
     // Use the unified location handler for pin drop
     parent.viewModel.handleLocationAction(.pinDrop(validCoordinate))
   }
@@ -351,6 +413,20 @@ class Coordinator: NSObject, MKMapViewDelegate {
     DispatchQueue.main.async {
       self.parent.viewModel.region = newRegion
       self.parent.viewModel.refreshPinsForCurrentRegion()
+    }
+  }
+
+  func mapView(_ mapView: MKMapView, didChange mode: MKUserTrackingMode, animated: Bool) {
+    // When the user manually drags the map or changes tracking mode,
+    // update the viewModel to reflect the change
+    DispatchQueue.main.async {
+      let shouldBeTracking = (mode == .follow || mode == .followWithHeading)
+      if self.parent.viewModel.isTrackingUserLocation != shouldBeTracking {
+        self.parent.viewModel.isTrackingUserLocation = shouldBeTracking
+        #if DEBUG
+        print("[MapView] User tracking mode changed to: \(mode.rawValue), isTracking: \(shouldBeTracking)")
+        #endif
+      }
     }
   }
 
@@ -396,6 +472,8 @@ class Coordinator: NSObject, MKMapViewDelegate {
         pinColor = UIColor(red: 1.0, green: 0.2, blue: 0.2, alpha: 1.0)  // Neon red
       case .emergency:
         pinColor = UIColor(red: 0.0, green: 1.0, blue: 0.0, alpha: 1.0)  // Neon green
+      case .ice:
+        pinColor = UIColor(red: 0.0, green: 0.8, blue: 1.0, alpha: 1.0)  // Cyan for ICE
       }
 
       annotationView?.markerTintColor = parent.viewModel.isEditMode ? .red : pinColor
@@ -466,9 +544,51 @@ class Coordinator: NSObject, MKMapViewDelegate {
     // Use the new refresh mechanism to handle video playback
     Task { @MainActor in
       do {
+        // First check premium access for this pin's video
+        let (canWatch, shouldPromptPremium, accessMessage) = await parent.viewModel.canWatchVideo(for: pin)
+        
+        if !canWatch {
+          // Show appropriate alert
+          if shouldPromptPremium {
+            // Show alert with options to purchase this zip code or upgrade to premium
+            let alert = UIAlertController(
+              title: "Video Locked",
+              message: accessMessage ?? "This video is in a different area",
+              preferredStyle: .alert
+            )
+            
+            // Option 1: Unlock this specific zip code
+            alert.addAction(UIAlertAction(title: "Unlock Zip \(pin.zipCode) ($0.99)", style: .default) { _ in
+              // Purchase this specific zip code
+              Task {
+                await PremiumManager.shared.purchaseZipCode(pin.zipCode)
+              }
+            })
+            
+            // Option 2: Upgrade to premium (unlimited)
+            alert.addAction(UIAlertAction(title: "Premium Unlimited ($4.99)", style: .default) { _ in
+              // Navigate to premium view
+              NotificationCenter.default.post(name: NSNotification.Name("ShowPremiumView"), object: nil)
+            })
+            
+            // Option 3: Cancel
+            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+            
+            if let topVC = getRootViewController() {
+              topVC.present(alert, animated: true)
+            }
+          } else {
+            parent.viewModel.showError(accessMessage ?? "Unable to play this video")
+          }
+          return
+        }
+        
+        // User can watch - proceed with playback
         // First check if we need to refresh the pin data
         if pin.videoURL.isEmpty {
+          #if DEBUG
           print("[MapView] Pin has empty videoURL, attempting to refresh from Firestore")
+          #endif
           if let refreshedPin = try await refreshPinFromFirestore(pinId: pin.id),
             !refreshedPin.videoURL.isEmpty
           {
@@ -476,7 +596,9 @@ class Coordinator: NSObject, MKMapViewDelegate {
             parent.viewModel.updatePinVideoURL(pin.id, newURL: refreshedPin.videoURL)
 
             // Play the video with the refreshed URL
+            #if DEBUG
             print("[MapView] Successfully refreshed pin with video URL: \(refreshedPin.videoURL)")
+            #endif
             await dismissExistingPlayer(animated: true)
             if let url = URL(string: refreshedPin.videoURL) {
               await playVideo(from: url)
@@ -502,7 +624,9 @@ class Coordinator: NSObject, MKMapViewDelegate {
           }
         } else {
           // We already have a video URL, proceed with normal playback
+          #if DEBUG
           print("[MapView] Pin already has videoURL: \(pin.videoURL)")
+          #endif
           await dismissExistingPlayer(animated: true)
           if let url = URL(string: pin.videoURL) {
             await playVideo(from: url)
@@ -772,19 +896,23 @@ extension Array {
 
 // Function to play video for a pin
 @MainActor
-func playVideo(for pin: Pin) {
+func playVideo(for pin: Pin, viewModel: MapViewModel) {
   guard !pin.videoURL.isEmpty else {
     // First try to refresh the pin from Firestore to get the latest data
     Task {
       do {
+        #if DEBUG
         print("[MapView] Attempting to refresh pin data from Firestore for \(pin.id)")
+        #endif
         let refreshedPin = try await refreshPinFromFirestore(pinId: pin.id)
 
         if let refreshedPin = refreshedPin, !refreshedPin.videoURL.isEmpty {
+          #if DEBUG
           print("[MapView] Successfully refreshed pin with video URL: \(refreshedPin.videoURL)")
+          #endif
           await MainActor.run {
             // Play the video with the refreshed URL
-            playVideoWithURL(refreshedPin.videoURL, for: refreshedPin)
+            playVideoWithURL(refreshedPin.videoURL, for: refreshedPin, viewModel: viewModel)
           }
         } else {
           // Still no video URL after refresh
@@ -802,7 +930,9 @@ func playVideo(for pin: Pin) {
           topMostViewController()?.present(alert, animated: true)
         }
       } catch {
+        #if DEBUG
         print("[MapView] Error refreshing pin data: \(error.localizedDescription)")
+        #endif
         let errorAlert = UIAlertController(
           title: "Error", message: "Failed to load video: \(error.localizedDescription)",
           preferredStyle: .alert)
@@ -815,18 +945,22 @@ func playVideo(for pin: Pin) {
   }
 
   // If we already have a video URL, play it directly
-  playVideoWithURL(pin.videoURL, for: pin)
+  playVideoWithURL(pin.videoURL, for: pin, viewModel: viewModel)
 }
 
 // Helper function to refresh a pin from Firestore
 func refreshPinFromFirestore(pinId: String) async throws -> Pin? {
+  #if DEBUG
   print("[MapView] Refreshing pin data for ID: \(pinId)")
+  #endif
   let db = Firestore.firestore()
   let docRef = db.collection("pins").document(pinId)
 
   let snapshot = try await docRef.getDocument()
   guard let data = snapshot.data() else {
+    #if DEBUG
     print("[MapView] No data found for pin ID: \(pinId)")
+    #endif
     return nil
   }
 
@@ -837,7 +971,9 @@ func refreshPinFromFirestore(pinId: String) async throws -> Pin? {
     let typeString = data["type"] as? String,
     let userId = data["userId"] as? String
   else {
+    #if DEBUG
     print("[MapView] Invalid pin data format")
+    #endif
     return nil
   }
 
@@ -845,7 +981,9 @@ func refreshPinFromFirestore(pinId: String) async throws -> Pin? {
   let incidentType = IncidentType.fromFirestoreType(typeString)
   let videoURL = data["videoURL"] as? String ?? ""
 
+  #if DEBUG
   print("[MapView] Refreshed pin data - videoURL: '\(videoURL)'")
+  #endif
 
   return Pin(
     id: id, coordinate: coordinate, incidentType: incidentType, videoURL: videoURL, userId: userId)
@@ -853,7 +991,7 @@ func refreshPinFromFirestore(pinId: String) async throws -> Pin? {
 
 // Helper function to play video with URL
 @MainActor
-func playVideoWithURL(_ videoURL: String, for pin: Pin) {
+func playVideoWithURL(_ videoURL: String, for pin: Pin, viewModel: MapViewModel) {
   print(
     "[MapView] Attempting to play video for pin \(pin.id), videoURL: '\(videoURL)', isEmpty: \(videoURL.isEmpty)"
   )
@@ -874,30 +1012,60 @@ func playVideoWithURL(_ videoURL: String, for pin: Pin) {
     return
   }
 
-  // Play video from URL
-  if let url = URL(string: videoURL) {
-    print("Playing directly from URL...")
-    let player = AVPlayer(url: url)
-    let playerViewController = AVPlayerViewController()
-    playerViewController.player = player
-
-    // Find the view controller to present from
-    if let topVC = topMostViewController() {
-      topVC.present(playerViewController, animated: true) {
-        print("Presentation completion handler executed for AVPlayerViewController")
-        player.play()
+  // Check if user can watch this video (premium restriction for non-premium users)
+  Task {
+    let (canWatch, shouldPromptPremium, message) = await viewModel.canWatchVideo(for: pin)
+    
+    await MainActor.run {
+      if !canWatch {
+        // Show appropriate message
+        let alert = UIAlertController(
+          title: shouldPromptPremium ? "Premium Feature" : "Video Unavailable",
+          message: message ?? "Unable to play this video",
+          preferredStyle: .alert
+        )
+        
+        if shouldPromptPremium {
+          // Add "Upgrade to Premium" button
+          alert.addAction(UIAlertAction(title: "Upgrade to Premium", style: .default) { _ in
+            // Navigate to premium view
+            NotificationCenter.default.post(name: NSNotification.Name("ShowPremiumView"), object: nil)
+          })
+          alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        } else {
+          alert.addAction(UIAlertAction(title: "OK", style: .default))
+        }
+        
+        topMostViewController()?.present(alert, animated: true)
+        return
       }
+      
+      // User can watch - proceed with playback
+      if let url = URL(string: videoURL) {
+        print("Playing directly from URL...")
+        let player = AVPlayer(url: url)
+        let playerViewController = AVPlayerViewController()
+        playerViewController.player = player
 
-      // Add observer to clean up when done
-      NotificationCenter.default.addObserver(
-        forName: .AVPlayerItemDidPlayToEndTime, object: player.currentItem, queue: .main
-      ) { _ in
-        print("Player item finished playing. Cleaning up temp file: \(url.lastPathComponent)")
-        playerViewController.dismiss(animated: true)
+        // Find the view controller to present from
+        if let topVC = topMostViewController() {
+          topVC.present(playerViewController, animated: true) {
+            print("Presentation completion handler executed for AVPlayerViewController")
+            player.play()
+          }
+
+          // Add observer to clean up when done
+          NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime, object: player.currentItem, queue: .main
+          ) { _ in
+            print("Player item finished playing. Cleaning up temp file: \(url.lastPathComponent)")
+            playerViewController.dismiss(animated: true)
+          }
+        }
+      } else {
+        print("Invalid video URL format")
       }
     }
-  } else {
-    print("Invalid video URL format")
   }
 }
 
