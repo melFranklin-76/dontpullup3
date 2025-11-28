@@ -16,7 +16,7 @@ This document provides instructions for configuring the in-app purchase for prem
 
 5. **Configure the product**:
    - **Reference Name**: "Zip Code Upgrade" (internal name only)
-   - **Product ID**: `com.dontpullup.app.zipcode_upgrade` (must match the ID in the code)
+   - **Product ID**: `com.dontpullup.zipcode.unlock` (must match the ID used in code)
    - **Cleared for Sale**: Yes
    - **Price Tier**: Tier 1 ($0.99 USD)
 

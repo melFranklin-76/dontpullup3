@@ -1,0 +1,45 @@
+{
+  "privacy": {
+    "tracking": {
+      "usesTracking": false
+    },
+    "dataCategories": [
+      {
+        "category": "Contact Info",
+        "collected": [
+          { "type": "Email Address", "linked": true, "usedForTracking": false, "purposes": ["App Functionality", "Account Management"] }
+        ]
+      },
+      {
+        "category": "Identifiers",
+        "collected": [
+          { "type": "User ID", "linked": true, "usedForTracking": false, "purposes": ["App Functionality", "Account Management"] },
+          { "type": "Device ID", "linked": false, "usedForTracking": false, "purposes": ["App Functionality", "Security"] }
+        ]
+      },
+      {
+        "category": "Location",
+        "collected": [
+          { "type": "Coarse Location", "linked": true, "usedForTracking": false, "purposes": ["App Functionality"] }
+        ]
+      },
+      {
+        "category": "Purchases",
+        "collected": [
+          { "type": "Purchase History", "linked": true, "usedForTracking": false, "purposes": ["App Functionality"] }
+        ]
+      },
+      {
+        "category": "Diagnostics",
+        "collected": []
+      }
+    ],
+    "apis": [
+      { "identifier": "NSPrivacyAccessedAPICategoryUserDefaults", "reasons": ["CA92.1"] },
+      { "identifier": "NSPrivacyAccessedAPICategoryFileTimestamp", "reasons": ["35F9.1"] },
+      { "identifier": "NSPrivacyAccessedAPICategoryDiskSpace", "reasons": ["E174.1"] },
+      { "identifier": "NSPrivacyAccessedAPICategorySystemBootTime", "reasons": ["35F9.1"] },
+      { "identifier": "NSPrivacyAccessedAPICategoryAdvertisingIdentifier", "reasons": [] }
+    ]
+  }
+}

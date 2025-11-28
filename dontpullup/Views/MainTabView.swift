@@ -32,7 +32,7 @@ struct MainTabView: View {
         Text(mapViewModel.alertMessage)
       }
       .sheet(isPresented: $mapViewModel.showingIncidentPicker) {
-        IncidentTypePicker(viewModel: mapViewModel)
+        IncidentPickerView(viewModel: mapViewModel)
       }
       .sheet(isPresented: $mapViewModel.showingHelp) {
         HelpView()
@@ -160,6 +160,7 @@ struct MapContentView: View {
       ZStack {
         // MapView should be the background with nothing behind it
         MapContentWrapper(viewModel: mapViewModel)
+          .frame(minWidth: 1, minHeight: 1)
           .edgesIgnoringSafeArea(.all)
           .preferredColorScheme(.dark)
 
@@ -748,3 +749,4 @@ extension View {
     */
   }
 }
+

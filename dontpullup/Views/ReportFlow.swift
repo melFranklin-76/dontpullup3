@@ -8,388 +8,104 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-/// Main container view that manages the three-step reporting flow
+/// Minimal sheet that lets the user decide how to attach the required video evidence.
 struct ReportFlowView: View {
   @ObservedObject var viewModel: MapViewModel
-  @State private var isRecording = false
-  @State private var recorder: AVCaptureSession?
-  @State private var videoURL: URL?
-  @State private var recordingDuration: TimeInterval = 0
-  @State private var showCamera = false
   @State private var showingVideoPicker = false
+  @State private var showingCamera = false
+  @State private var isPreparingVideo = false
 
   var body: some View {
-    ZStack {
-      ScrollView(.vertical, showsIndicators: false) {
-        VStack(alignment: .leading, spacing: 24) {
-          HStack(alignment: .center) {
-            VStack(alignment: .leading, spacing: 4) {
-              Text("Report Incident")
-                .font(.system(size: 28, weight: .bold, design: .rounded))
-                .foregroundColor(DPUTheme.colors.lightGray)
-
-              Text("Complete the steps below to submit a detailed report.")
-                .font(.subheadline)
-                .foregroundColor(DPUTheme.colors.mutedGray)
-            }
-
-            Spacer()
-
-            HStack(spacing: 4) {
-              ForEach(ReportStep.allCases, id: \.self) { step in
-                Circle()
-                  .fill(viewModel.reportStep == step ? DPUTheme.colors.alertRed : DPUTheme.colors.subtleSeparator)
-                  .frame(width: 10, height: 10)
-              }
-            }
+    VStack(spacing: 16) {
+      HStack(spacing: 20) {
+        Button {
+          if viewModel.authState.isAnonymous {
+            viewModel.showError("Guests cannot record videos.")
+          } else {
+            showingCamera = true
           }
-
-          if let currentStep = viewModel.reportStep {
-            switch currentStep {
-            case .type:
-              IncidentTypeSelectionView(viewModel: viewModel)
-            case .video:
-              VideoRecordingView(
-                viewModel: viewModel,
-                isRecording: $isRecording,
-                recorder: $recorder,
-                videoURL: $videoURL,
-                recordingDuration: $recordingDuration,
-                showCamera: $showCamera,
-                showingVideoPicker: $showingVideoPicker
-              )
-            case .confirm:
-              ConfirmReportView(viewModel: viewModel)
-            }
+        } label: {
+          VStack(spacing: 8) {
+            Image(systemName: "video.fill")
+              .font(.system(size: 40))
+            Text("Record")
+              .font(.caption)
           }
-
-          Divider()
-            .background(DPUTheme.colors.subtleSeparator)
-
-          if let currentStep = viewModel.reportStep {
-            HStack(spacing: 12) {
-              Button("Cancel") {
-                viewModel.reportStep = nil
-              }
-              .buttonStyle(SecondaryButtonStyle())
-
-              Spacer()
-
-              controls(for: currentStep)
-            }
-          }
+          .frame(maxWidth: .infinity)
+          .padding()
+          .background(Color.red.opacity(0.2))
+          .cornerRadius(12)
         }
-        .glassSheetStyle()
+
+        Button {
+          if viewModel.authState.isAnonymous {
+            viewModel.showError("Guests cannot upload videos.")
+          } else {
+            showingVideoPicker = true
+          }
+        } label: {
+          VStack(spacing: 8) {
+            Image(systemName: "photo.on.rectangle")
+              .font(.system(size: 40))
+            Text("Photos")
+              .font(.caption)
+          }
+          .frame(maxWidth: .infinity)
+          .padding()
+          .background(Color.blue.opacity(0.2))
+          .cornerRadius(12)
+        }
       }
+      .padding()
+
+      if isPreparingVideo || (viewModel.uploadProgress > 0 && viewModel.uploadProgress < 1) {
+        ProgressView(value: viewModel.uploadProgress)
+          .progressViewStyle(LinearProgressViewStyle())
+          .padding(.horizontal)
+      }
+
+      Button("Cancel") {
+        viewModel.reportStep = nil
+      }
+      .foregroundColor(.secondary)
+      .padding(.top, 8)
     }
-    .dpuBackground()
+    .presentationDetents([.height(200)])
+    .presentationBackground(.ultraThinMaterial)
     .preferredColorScheme(.dark)
     .sheet(isPresented: $showingVideoPicker) {
-      VideoPicker(
-        onVideoPicked: { selectedVideoURL in
-          if let url = selectedVideoURL {
-            videoURL = url
-            print("[ReportFlow] Video selected: \(url)")
-          }
-        }, viewModel: viewModel)
+      VideoPicker(onVideoPicked: { handleVideoSelection($0) }, viewModel: viewModel)
+    }
+    .fullScreenCover(isPresented: $showingCamera) {
+      VideoRecorderView(maxDuration: 180) { url in
+        handleVideoSelection(url)
+      }
+      .ignoresSafeArea()
     }
   }
 
-  @ViewBuilder
-  private func controls(for step: ReportStep) -> some View {
-    switch step {
-    case .type:
-      Button("Next") {
-        viewModel.reportStep = .video
-      }
-      .buttonStyle(PrimaryButtonStyle())
+  private func handleVideoSelection(_ url: URL?) {
+    guard let url = url else {
+      isPreparingVideo = false
+      viewModel.reportStep = nil
+      return
+    }
 
-    case .video:
-      HStack(spacing: 12) {
-        Button("Back") {
-          viewModel.reportStep = .type
-        }
-        .buttonStyle(SecondaryButtonStyle())
+    isPreparingVideo = true
+    viewModel.reportDraft.videoURL = url
 
-        Button("Next") {
-          viewModel.reportStep = .confirm
+    Task {
+      await viewModel.upload(draft: viewModel.reportDraft)
+      await MainActor.run {
+        isPreparingVideo = false
+        if viewModel.reportStep != nil {
+          viewModel.reportStep = nil
         }
-        .buttonStyle(PrimaryButtonStyle())
-      }
-
-    case .confirm:
-      HStack(spacing: 12) {
-        Button("Back") {
-          viewModel.reportStep = .video
-        }
-        .buttonStyle(SecondaryButtonStyle())
-
-        Button("Submit") {
-          Task {
-            viewModel.reportDraft.videoURL = videoURL
-            await viewModel.upload(draft: viewModel.reportDraft)
-          }
-        }
-        .buttonStyle(PrimaryButtonStyle())
       }
     }
   }
 }
 
-/// Step 1: Select incident type
-struct IncidentTypeSelectionView: View {
-  @ObservedObject var viewModel: MapViewModel
-
-  var body: some View {
-    VStack(spacing: 20) {
-      Text("What type of incident would you like to report?")
-        .font(.headline)
-        .multilineTextAlignment(.center)
-        .padding(.horizontal)
-
-      // Incident type options
-      ForEach(IncidentType.allCases, id: \.self) { type in
-        Button(action: {
-          viewModel.reportDraft.incidentType = type
-        }) {
-          HStack {
-            Text(type.emoji)
-              .font(.title)
-
-            VStack(alignment: .leading) {
-              Text(type.title)
-                .font(.headline)
-              Text(type.description)
-                .font(.caption)
-                .foregroundColor(.gray)
-            }
-
-            Spacer()
-
-            if viewModel.reportDraft.incidentType == type {
-              Image(systemName: "checkmark.circle.fill")
-                .foregroundColor(.green)
-            }
-          }
-          .padding()
-          .background(
-            RoundedRectangle(cornerRadius: 10)
-              .stroke(
-                viewModel.reportDraft.incidentType == type ? type.color : Color.gray, lineWidth: 2)
-          )
-        }
-        .buttonStyle(PlainButtonStyle())
-      }
-
-      Spacer()
-    }
-    .padding()
-  }
-}
-
-/// Step 2: Record video or skip
-struct VideoRecordingView: View {
-  @ObservedObject var viewModel: MapViewModel
-  @Binding var isRecording: Bool
-  @Binding var recorder: AVCaptureSession?
-  @Binding var videoURL: URL?
-  @Binding var recordingDuration: TimeInterval
-  @Binding var showCamera: Bool
-  @Binding var showingVideoPicker: Bool
-
-  var body: some View {
-    VStack(spacing: 20) {
-      Text("Include a video with your report?")
-        .font(.headline)
-        .multilineTextAlignment(.center)
-        .padding(.horizontal)
-
-      // No video option
-      VStack(spacing: 12) {
-        Image(systemName: "xmark.circle")
-          .font(.system(size: 60))
-          .foregroundColor(.gray)
-
-        Text("No video")
-          .font(.title3)
-          .foregroundColor(.gray)
-
-        Text("Continue with location only")
-          .font(.caption)
-          .foregroundColor(.gray)
-      }
-      .frame(maxWidth: .infinity)
-      .padding()
-      .background(
-        RoundedRectangle(cornerRadius: 12)
-          .stroke(Color.gray, lineWidth: 1)
-      )
-      .padding(.horizontal)
-      .onTapGesture {
-        // Clear any video URL
-        videoURL = nil
-      }
-
-      Divider()
-        .padding(.vertical)
-
-      // Use existing video
-      VStack(spacing: 12) {
-        Image(systemName: "video.fill")
-          .font(.system(size: 60))
-          .foregroundColor(viewModel.authState.isAnonymous ? .gray : .blue)
-
-        Text("Select existing video")
-          .font(.title3)
-          .foregroundColor(viewModel.authState.isAnonymous ? .gray : .blue)
-
-        Text("Choose a video from your library")
-          .font(.caption)
-          .foregroundColor(.gray)
-
-        if viewModel.authState.isAnonymous {
-          Text("Video upload disabled for guests")
-            .font(.caption)
-            .foregroundColor(.orange)
-            .padding(.top, 2)
-        }
-      }
-      .frame(maxWidth: .infinity)
-      .padding()
-      .background(
-        RoundedRectangle(cornerRadius: 12)
-          .stroke(viewModel.authState.isAnonymous ? Color.gray : Color.blue, lineWidth: 1)
-      )
-      .padding(.horizontal)
-      .onTapGesture {
-        if viewModel.authState.isAnonymous {
-          viewModel.showError("Guests cannot upload videos.")
-        } else {
-          showingVideoPicker = true
-        }
-      }
-
-      Spacer()
-
-      // Note about video selection
-      if videoURL != nil {
-        Text("Video selected")
-          .foregroundColor(.green)
-          .padding()
-          .background(
-            RoundedRectangle(cornerRadius: 8)
-              .fill(Color.green.opacity(0.1))
-          )
-      }
-    }
-    .padding()
-  }
-}
-
-/// Step 3: Confirm and submit report
-struct ConfirmReportView: View {
-  @ObservedObject var viewModel: MapViewModel
-
-  var body: some View {
-    VStack(spacing: 20) {
-      Text("Confirm Your Report")
-        .font(.headline)
-        .multilineTextAlignment(.center)
-        .padding(.horizontal)
-
-      VStack(alignment: .leading, spacing: 16) {
-        HStack {
-          Text("Incident Type:")
-            .fontWeight(.semibold)
-
-          Text(
-            "\(viewModel.reportDraft.incidentType.emoji) \(viewModel.reportDraft.incidentType.title)"
-          )
-        }
-
-        HStack {
-          Text("Location:")
-            .fontWeight(.semibold)
-
-          let coord = viewModel.reportDraft.coordinate
-          Text(String(format: "%.5f, %.5f", coord.latitude, coord.longitude))
-            .font(.system(.subheadline, design: .monospaced))
-        }
-
-        HStack {
-          Text("Video:")
-            .fontWeight(.semibold)
-
-          if viewModel.reportDraft.videoURL != nil {
-            Text("Included")
-              .foregroundColor(.green)
-          } else {
-            Text("None")
-              .foregroundColor(.gray)
-          }
-        }
-
-        // Mini map
-        ZStack {
-          Color(.systemGray6)
-            .frame(height: 150)
-            .cornerRadius(12)
-
-          Text("Location Preview")
-            .foregroundColor(.gray)
-        }
-      }
-      .padding()
-      .background(
-        RoundedRectangle(cornerRadius: 12)
-          .stroke(Color.gray, lineWidth: 1)
-      )
-
-      if viewModel.uploadProgress > 0 {
-        VStack(spacing: 8) {
-          ProgressView(value: viewModel.uploadProgress)
-            .progressViewStyle(LinearProgressViewStyle())
-
-          Text("\(Int(viewModel.uploadProgress * 100))% Uploaded")
-            .font(.caption)
-            .foregroundColor(.gray)
-        }
-        .padding()
-      }
-
-      Spacer()
-    }
-    .padding()
-  }
-}
-
-// MARK: - Button Styles
-
-struct PrimaryButtonStyle: ButtonStyle {
-  func makeBody(configuration: Configuration) -> some View {
-    configuration.label
-      .padding(.horizontal, 20)
-      .padding(.vertical, 10)
-      .background(DPUTheme.colors.alertRed)
-      .foregroundColor(.white)
-      .cornerRadius(8)
-      .scaleEffect(configuration.isPressed ? 0.95 : 1)
-      .opacity(configuration.isPressed ? 0.9 : 1)
-  }
-}
-
-struct SecondaryButtonStyle: ButtonStyle {
-  func makeBody(configuration: Configuration) -> some View {
-    configuration.label
-      .padding(.horizontal, 20)
-      .padding(.vertical, 10)
-      .background(Color.gray.opacity(0.2))
-      .foregroundColor(DPUTheme.colors.lightGray)
-      .cornerRadius(8)
-      .scaleEffect(configuration.isPressed ? 0.95 : 1)
-      .opacity(configuration.isPressed ? 0.9 : 1)
-  }
-}
 
 /// A proper video picker implementation using PHPickerViewController
 struct VideoPicker: UIViewControllerRepresentable {
@@ -527,6 +243,9 @@ struct VideoPicker: UIViewControllerRepresentable {
     }
   }
 }
+
+// CameraVideoPicker has been replaced by VideoRecorderView for better camera control
+// and to eliminate UIImagePickerController warnings
 
 // MARK: - Preview
 struct ReportFlowView_Previews: PreviewProvider {

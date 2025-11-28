@@ -12,8 +12,8 @@ class PremiumManager: ObservableObject {
 
   // Premium product identifiers - must match App Store Connect product IDs
   // IMPORTANT: These must be configured in App Store Connect before use
-  private let premiumUnlimitedProductID = "com.dontpullup.premium.unlimited"
-  private let zipCodeUnlockProductID = "com.dontpullup.zipcode.unlock"
+  static let premiumUnlimitedProductID = "com.dontpullup.premium.unlimited"
+  static let zipCodeUnlockProductID = "com.dontpullup.zipcode.unlock"
 
   // Published properties for UI binding
   @Published var isLoading = false
@@ -63,7 +63,7 @@ class PremiumManager: ObservableObject {
 
     do {
       // Request products from the App Store using the new StoreKit 2 API
-      let storeProducts = try await Product.products(for: [premiumUnlimitedProductID, zipCodeUnlockProductID])
+      let storeProducts = try await Product.products(for: [Self.premiumUnlimitedProductID, Self.zipCodeUnlockProductID])
 
       // Update the published products array on the main thread
       await MainActor.run {
@@ -129,9 +129,11 @@ class PremiumManager: ObservableObject {
   // Use this to enable testing mode even on real devices during development
   // Set to true to use test mode, false to use real App Store purchases
   private var forceTestMode: Bool {
-    // For testing premium features, set to true to simulate purchases
-    // For production testing, set to false to use real App Store
-    return true  // Currently using test mode for development
+    #if DEBUG
+      return true
+    #else
+      return false
+    #endif
   }
 
   func purchasePremium() async {
@@ -148,7 +150,7 @@ class PremiumManager: ObservableObject {
       return
     }
 
-    guard let product = products.first(where: { $0.id == premiumUnlimitedProductID }) else {
+    guard let product = products.first(where: { $0.id == Self.premiumUnlimitedProductID }) else {
       print("[PremiumManager] Premium product not found - showing error")
       purchaseError = "Premium upgrade not available. Please try again later."
       return
@@ -219,7 +221,7 @@ class PremiumManager: ObservableObject {
       return
     }
     
-    guard let product = products.first(where: { $0.id == zipCodeUnlockProductID }) else {
+    guard let product = products.first(where: { $0.id == Self.zipCodeUnlockProductID }) else {
       print("[PremiumManager] Zip code product not found")
       purchaseError = "Zip code unlock not available. Please try again later."
       zipCodeBeingPurchased = nil
@@ -365,7 +367,7 @@ class PremiumManager: ObservableObject {
       // Extract verified transaction directly
       if case .verified(let transaction) = result {
         // Check if this transaction is for our product
-        if transaction.productID == zipCodeUnlockProductID {
+        if transaction.productID == Self.zipCodeUnlockProductID {
           // If we found a transaction for our product, keep it
           latestTransaction = transaction
         }
@@ -384,7 +386,7 @@ class PremiumManager: ObservableObject {
     print("[PremiumManager] Processing transaction: \(transaction.productID)")
 
     // Check if the transaction is for our product
-    guard transaction.productID == zipCodeUnlockProductID else {
+    guard transaction.productID == Self.zipCodeUnlockProductID else {
       print("[PremiumManager] Transaction is not for our product: \(transaction.productID)")
       return
     }

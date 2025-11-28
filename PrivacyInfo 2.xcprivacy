@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Starter Privacy Manifest -->
+    <!-- Tracking is disabled; add tracking domains only if you implement cross-app tracking. -->
+    <key>NSPrivacyTracking</key>
+    <false/>
+    <key>NSPrivacyTrackingDomains</key>
+    <array/>
+
+    <!-- Keep this minimal to start; expand with NSPrivacyCollectedDataTypes and NSPrivacyAccessedAPITypes
+         if you collect additional data or use Required Reason APIs. -->
+</dict>
+</plist>

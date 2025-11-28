@@ -103,8 +103,8 @@ enum StorageUploader {
       }
     }
 
-    // Check if video is too long (30 seconds max)
-    let maxDuration: Double = 30.0
+    // Check if video is too long (3 minutes / 180 seconds max)
+    let maxDuration: Double = 180.0
     if videoDuration.seconds > maxDuration {
       print(
         "[StorageUploader] Video too long: \(videoDuration.seconds) seconds, max is \(maxDuration)")
@@ -113,7 +113,7 @@ enum StorageUploader {
         code: 1,
         userInfo: [
           NSLocalizedDescriptionKey:
-            "Video is too long. Please record a video that is \(Int(maxDuration)) seconds or less."
+            "Video is too long. Please record a video that is 3 minutes or less."
         ])
     }
 
@@ -257,7 +257,7 @@ enum StorageUploader {
   /// - Returns: Remote URL as String (empty if no local URL was provided)
   /// - Throws: Error if upload fails
   static func uploadIfNeeded(
-    pinId: String, localURL: URL?, useChunks: Bool = true, convertToGif: Bool = false
+    pinId: String, localURL: URL?, useChunks: Bool = false, convertToGif: Bool = false
   ) async throws -> String {
     // Start background task to allow upload to complete if app goes to background
     let taskID = await UIApplication.shared.beginBackgroundTask(expirationHandler: nil)
@@ -287,7 +287,7 @@ enum StorageUploader {
       storage.maxDownloadRetryTime = 5
 
       let timestamp = Int(Date().timeIntervalSince1970)
-      let storageRef = storage.reference().child("g/\(timestamp)-\(pinId.prefix(8)).gif")
+      let storageRef = storage.reference().child("videos/gif-\(timestamp)-\(pinId.prefix(8)).gif")
 
       // Create metadata
       let metadata = StorageMetadata()
@@ -414,7 +414,7 @@ enum StorageUploader {
 
     // Generate a smaller filename to reduce overhead
     let timestamp = Int(Date().timeIntervalSince1970)
-    let storageRef = storage.reference().child("v/\(timestamp)-\(pinId.prefix(8)).mp4")
+    let storageRef = storage.reference().child("videos/\(timestamp)-\(pinId.prefix(8)).mp4")
 
     // Create metadata with required fields from Storage rules
     let metadata = StorageMetadata()
@@ -562,7 +562,7 @@ enum StorageUploader {
     // Generate a unique upload ID
     let uploadId = UUID().uuidString
     let timestamp = Int(Date().timeIntervalSince1970)
-    let finalPath = "v/\(timestamp)-\(pinId.prefix(8)).mp4"
+    let finalPath = "videos/\(timestamp)-\(pinId.prefix(8)).mp4"
 
     // Upload each chunk
     var uploadedChunks = 0
@@ -573,7 +573,8 @@ enum StorageUploader {
       let chunkData = data.subdata(in: start..<end)
 
       // Create a reference for this chunk
-      let chunkRef = Storage.storage().reference().child("chunks/\(uploadId)/chunk\(chunkIndex)")
+      let chunkRef = Storage.storage().reference().child(
+        "videos/tmp-\(uploadId)-chunk\(chunkIndex)")
 
       // Upload the chunk
       _ = try await withCheckedThrowingContinuation {
@@ -861,7 +862,7 @@ enum StorageUploader {
     print("[StorageUploader] Starting upload to Firebase Storage")
 
     let storageRef = Storage.storage().reference()
-    let videoRef = storageRef.child("videos/\(pinID)/\(UUID().uuidString).mp4")
+    let videoRef = storageRef.child("videos/\(pinID)-\(UUID().uuidString).mp4")
 
     // Set metadata
     let metadata = StorageMetadata()

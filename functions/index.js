@@ -6,6 +6,34 @@ admin.initializeApp();
 // Force redeployment - v3
 setGlobalOptions({maxInstances: 10});
 
+exports.cleanupInvalidTokens = functions.https.onCall(async (request, context) => {
+  console.log("=== Cleanup Invalid Tokens Called ===");
+
+  const invalidTokens = request.data?.invalidTokens || [];
+  console.log("Cleaning up", invalidTokens.length, "invalid tokens");
+
+  const results = [];
+
+  for (const tokenInfo of invalidTokens) {
+    const { token, userId } = tokenInfo;
+    try {
+      await admin.firestore()
+        .collection("users")
+        .doc(userId)
+        .update({
+          fcmToken: admin.firestore.FieldValue.delete(),
+        });
+      console.log("Cleaned up token for user", userId);
+      results.push({ userId, success: true });
+    } catch (error) {
+      console.error("Failed to clean up token for user", userId, ":", error.message);
+      results.push({ userId, success: false, error: error.message });
+    }
+  }
+
+  return { results };
+});
+
 exports.sendIncidentNotification = functions.https.onCall(async (request, context) => {
   console.log("=== Cloud Function Called ===");
   

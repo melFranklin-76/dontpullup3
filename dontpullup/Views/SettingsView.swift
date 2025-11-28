@@ -240,7 +240,7 @@ struct SettingsView: View {
                   .font(.headline)
                   .foregroundColor(.gray)
 
-                Text("Version 1.0.0 (Build 1)")
+                Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0") (Build \(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"))")
                   .font(.caption)
                   .foregroundColor(.gray)
               }

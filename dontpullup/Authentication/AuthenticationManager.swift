@@ -13,7 +13,7 @@ final class AuthenticationManager: ObservableObject {
   static let shared = AuthenticationManager()
   private let pendingFCMTokenKey = "PendingFCMTokenKey"
   private var handle: AuthStateDidChangeListenerHandle?
-  private let db = Firestore.firestore()
+  private lazy var db: Firestore = { Firestore.firestore() }()
 
   init() {
     setupAuthStateListener()
@@ -273,6 +273,7 @@ final class AuthenticationManager: ObservableObject {
     } catch {
       #if DEBUG
       print("AuthenticationManager: Error updating FCM token: \(error.localizedDescription)")
+      print("AuthenticationManager: Error details - Domain: \((error as NSError).domain), Code: \((error as NSError).code)")
       #endif
 
       // If the document doesn't exist, create it
@@ -282,6 +283,22 @@ final class AuthenticationManager: ObservableObject {
         print("AuthenticationManager: User document doesn't exist, creating it")
         #endif
         await createMissingUserProfile(userId: userId)
+      } else {
+        // For other Firestore errors, retry once after a short delay
+        #if DEBUG
+        print("AuthenticationManager: Retrying FCM token update after delay...")
+        #endif
+        try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second delay
+        do {
+          try await db.collection("users").document(userId).updateData(["fcmToken": token])
+          #if DEBUG
+          print("AuthenticationManager: FCM token updated successfully on retry")
+          #endif
+        } catch let retryError {
+          #if DEBUG
+          print("AuthenticationManager: FCM token update failed on retry: \(retryError.localizedDescription)")
+          #endif
+        }
       }
     }
   }
@@ -366,7 +383,8 @@ final class AuthenticationManager: ObservableObject {
         originalZipCode: profile.originalZipCode,
         purchasedZipCodes: profile.purchasedZipCodes,
         currentZipCode: profile.currentZipCode ?? newZipCode,
-        currentZipUpdatedAt: profile.currentZipUpdatedAt
+        currentZipUpdatedAt: profile.currentZipUpdatedAt,
+        zipCodeNotifications: profile.zipCodeNotifications
       )
       self.currentUserProfile = updatedProfile
 
@@ -389,6 +407,82 @@ final class AuthenticationManager: ObservableObject {
       #endif
       throw error
     }
+  }
+
+  func updateHomeZipCode(_ newZipCode: String) async throws {
+    guard let userId = currentUser?.uid else {
+      throw NSError(
+        domain: "AuthenticationManager", code: -1,
+        userInfo: [NSLocalizedDescriptionKey: "No user is currently signed in"])
+    }
+
+    guard let profile = currentUserProfile else {
+      throw NSError(
+        domain: "AuthenticationManager", code: -2,
+        userInfo: [NSLocalizedDescriptionKey: "User profile not loaded"])
+    }
+
+    try await db.collection("users").document(userId).updateData([
+      "zipCode": newZipCode,
+      "originalZipCode": newZipCode
+    ])
+
+    let updatedProfile = UserProfile(
+      id: profile.id,
+      email: profile.email,
+      zipCode: newZipCode,
+      fcmToken: profile.fcmToken,
+      createdAt: profile.createdAt,
+      lastActive: Date(),
+      isPremium: profile.isPremium,
+      originalZipCode: newZipCode,
+      purchasedZipCodes: profile.purchasedZipCodes,
+      currentZipCode: profile.currentZipCode ?? newZipCode,
+      currentZipUpdatedAt: Date(),
+      zipCodeNotifications: profile.zipCodeNotifications
+    )
+    self.currentUserProfile = updatedProfile
+  }
+
+  func addUnlockedZipCode(_ zipCode: String) async throws {
+    guard let userId = currentUser?.uid else {
+      throw NSError(
+        domain: "AuthenticationManager", code: -1,
+        userInfo: [NSLocalizedDescriptionKey: "No user is currently signed in"])
+    }
+
+    guard var profile = currentUserProfile else {
+      throw NSError(
+        domain: "AuthenticationManager", code: -2,
+        userInfo: [NSLocalizedDescriptionKey: "User profile not loaded"])
+    }
+
+    if profile.purchasedZipCodes.contains(zipCode) {
+      return
+    }
+
+    var updatedZips = profile.purchasedZipCodes
+    updatedZips.append(zipCode)
+
+    try await db.collection("users").document(userId).updateData([
+      "purchasedZipCodes": FieldValue.arrayUnion([zipCode])
+    ])
+
+    profile = UserProfile(
+      id: profile.id,
+      email: profile.email,
+      zipCode: profile.zipCode,
+      fcmToken: profile.fcmToken,
+      createdAt: profile.createdAt,
+      lastActive: Date(),
+      isPremium: profile.isPremium,
+      originalZipCode: profile.originalZipCode,
+      purchasedZipCodes: updatedZips,
+      currentZipCode: profile.currentZipCode,
+      currentZipUpdatedAt: profile.currentZipUpdatedAt,
+      zipCodeNotifications: profile.zipCodeNotifications
+    )
+    self.currentUserProfile = profile
   }
 
   /// Completely deletes user account and all associated data
@@ -566,6 +660,32 @@ final class AuthenticationManager: ObservableObject {
     }
   }
 
+  /// Validates and refreshes FCM token if needed
+  func validateAndRefreshFCMToken() async {
+    #if DEBUG
+    print("AuthenticationManager: Validating FCM token")
+    #endif
+
+    guard let currentToken = Messaging.messaging().fcmToken else {
+      #if DEBUG
+      print("AuthenticationManager: No current FCM token available")
+      #endif
+      return
+    }
+
+    // Check if stored token matches current token
+    if currentUserProfile?.fcmToken != currentToken {
+      #if DEBUG
+      print("AuthenticationManager: FCM token mismatch detected, updating...")
+      #endif
+      await updateFCMToken(currentToken)
+    } else {
+      #if DEBUG
+      print("AuthenticationManager: FCM token is current")
+      #endif
+    }
+  }
+
   /// Updates notification preference for a specific zip code
   func updateNotificationPreference(_ enabled: Bool, for zipCode: String) async {
     #if DEBUG
@@ -619,3 +739,4 @@ final class AuthenticationManager: ObservableObject {
     NotificationCenter.default.removeObserver(self)
   }
 }
+

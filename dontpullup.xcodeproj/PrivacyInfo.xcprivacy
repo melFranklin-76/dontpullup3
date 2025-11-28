@@ -1,0 +1,51 @@
+{
+  "privacyManifestVersion": 1,
+  "dataCollection": {
+    "deviceInfo": {
+      "collectedData": [
+        "deviceName",
+        "deviceModel",
+        "operatingSystemVersion",
+        "deviceIdentifier"
+      ],
+      "purpose": "To improve app functionality and user experience by customizing app behavior based on device characteristics.",
+      "apiUsed": [
+        "UIDevice"
+      ],
+      "required": true
+    },
+    "storeKit": {
+      "collectedData": [
+        "purchaseTransactions",
+        "productIdentifiers"
+      ],
+      "purpose": "To process in-app purchases and manage subscriptions.",
+      "apiUsed": [
+        "StoreKit"
+      ],
+      "required": true
+    },
+    "firebaseAnalytics": {
+      "collectedData": [
+        "eventData",
+        "userEngagementMetrics"
+      ],
+      "purpose": "To analyze app usage and improve app performance.",
+      "apiUsed": [
+        "FirebaseAnalytics"
+      ],
+      "required": false
+    },
+    "firebaseMessaging": {
+      "collectedData": [
+        "deviceToken",
+        "pushNotificationPreferences"
+      ],
+      "purpose": "To send push notifications and user-targeted messages.",
+      "apiUsed": [
+        "FirebaseMessaging"
+      ],
+      "required": false
+    }
+  }
+}

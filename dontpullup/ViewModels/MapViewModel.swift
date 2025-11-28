@@ -1,9 +1,11 @@
 import AVKit
+import Combine
 @preconcurrency import CoreLocation
 @preconcurrency import Dispatch
 import FirebaseAuth
 import FirebaseFirestore
 import FirebaseStorage
+typealias ListenerRegistration = FirebaseFirestore.ListenerRegistration
 import MapKit
 import Photos
 import SwiftUI
@@ -140,6 +142,7 @@ class MapViewModel: NSObject, ObservableObject {
   }
   @Published var mapRegion: MKCoordinateRegion?
   @Published var showingOnlyMyPins = false
+  @Published private(set) var accessibleZipCodes: Set<String> = []
   var pendingCoordinate: CLLocationCoordinate2D?
   var isRequestingLocation = false
   var currentlyPlayingVideoId: String?
@@ -167,21 +170,24 @@ class MapViewModel: NSObject, ObservableObject {
   var authState: AuthState
 
   // Add NotificationManager for zip code notifications
-  private let notificationManager = NotificationManager.shared
+  private lazy var notificationManager = NotificationManager.shared
   private let authManager = AuthenticationManager.shared
+  private let zipAccessManager = ZipAccessManager.shared
 
   // MARK: - Private Properties
   private let locationManager = CLLocationManager()
-  private let db = Firestore.firestore()
+  private lazy var db: Firestore = { Firestore.firestore() }()
   private var lastPresenceZipCode: String?
   private var lastPresenceLocation: CLLocation?
   private var lastPresenceUpdateDate: Date?
   private let presenceUpdateDistanceThreshold: CLLocationDistance = 120  // meters
   private let presenceUpdateInterval: TimeInterval = 60  // seconds between duplicate writes
+  private var cancellables = Set<AnyCancellable>()
   
   // Geographic filtering properties
   private var lastQueriedRegion: MKCoordinateRegion?
   private let minimumRegionChangeThreshold: Double = 0.3 // 30% change triggers reload
+  private var pinsListener: ListenerRegistration?
 
   // MARK: - Computed Properties
   var filteredPins: [Pin] {
@@ -195,10 +201,15 @@ class MapViewModel: NSObject, ObservableObject {
       // Apply incident type filter
       let passesTypeFilter = selectedFilters.isEmpty || selectedFilters.contains(pin.incidentType)
 
-      // All users (premium and non-premium) see all pins
-      // Non-premium users are only restricted from watching videos outside their current zip code
-      // This restriction is enforced in the video playback logic, not here
-      return passesTypeFilter
+      // Apply zip access filter when a pin has an associated zip code
+      let passesZipFilter: Bool
+      if pin.zipCode.isEmpty {
+        passesZipFilter = true  // Legacy pins without zip remain visible
+      } else {
+        passesZipFilter = zipAccessManager.hasAccess(to: pin.zipCode)
+      }
+
+      return passesTypeFilter && passesZipFilter
     }
   }
 
@@ -556,8 +567,12 @@ class MapViewModel: NSObject, ObservableObject {
   // MARK: - Alert handling
   func showError(_ message: String) {
     Task { @MainActor in
-      // Add message to queue and try to show
+      // Add message to queue and try to show after a brief delay
+      // This prevents "presentation in progress" conflicts when sheets are dismissing
       alertQueue.append(message)
+      
+      // Small delay to allow any ongoing presentations/dismissals to complete
+      try? await Task.sleep(nanoseconds: 300_000_000)  // 0.3 seconds
       processAlertQueue()
     }
   }
@@ -567,10 +582,13 @@ class MapViewModel: NSObject, ObservableObject {
     // Only proceed if we're not already showing an alert and we have messages
     guard !isShowingAlert, !alertQueue.isEmpty else { return }
 
-    // Get the next message and mark as showing
-    alertMessage = alertQueue.removeFirst()
-    isShowingAlert = true
-    showAlert = true
+    // Use DispatchQueue.main.async to defer the state update and avoid
+    // "Publishing changes from within view updates" warning
+    DispatchQueue.main.async {
+      self.alertMessage = self.alertQueue.removeFirst()
+      self.isShowingAlert = true
+      self.showAlert = true
+    }
   }
 
   /// Starts pre-compression of video immediately when selected for ultra-fast uploads
@@ -921,6 +939,20 @@ class MapViewModel: NSObject, ObservableObject {
     }
   }
 
+  @MainActor
+  func beginVideoCaptureFlow(for incidentType: IncidentType) {
+    guard let pendingCoordinate = pendingCoordinate else {
+      showError("Unable to determine pin location. Please try again.")
+      showingIncidentPicker = false
+      return
+    }
+
+    reportDraft = PinDraft(coordinate: pendingCoordinate, incidentType: incidentType)
+    self.pendingCoordinate = nil
+    showingIncidentPicker = false
+    reportStep = .video
+  }
+
   func deletePin(_ pin: Pin) async throws {
     do {
       try await db.collection("pins").document(pin.id).delete()
@@ -967,6 +999,14 @@ class MapViewModel: NSObject, ObservableObject {
     Task {
       await cleanupInvalidPins()
     }
+
+    accessibleZipCodes = zipAccessManager.effectiveAccessZIPs
+    zipAccessManager.$effectiveAccessZIPs
+      .receive(on: DispatchQueue.main)
+      .sink { [weak self] newSet in
+        self?.accessibleZipCodes = newSet
+      }
+      .store(in: &cancellables)
   }
 
   deinit {
@@ -975,9 +1015,13 @@ class MapViewModel: NSObject, ObservableObject {
       self, name: .appDidBecomeActiveForLocationCheck, object: nil)
     NotificationCenter.default.removeObserver(
       self, name: Notification.Name("UploadProgressUpdated"), object: nil)
+
+    // Remove Firestore listener
+    pinsListener?.remove()
+
     #if DEBUG
     print(
-      "[MapViewModel] Deinitialized and unsubscribed from notifications."
+      "[MapViewModel] Deinitialized and unsubscribed from notifications and Firestore listener."
     )
     #endif
   }
@@ -999,71 +1043,116 @@ class MapViewModel: NSObject, ObservableObject {
 
   private func loadPins() {
     #if DEBUG
-    print("[MapViewModel] Loading pins from Firestore")
+    print("[MapViewModel] Setting up real-time pins listener")
     #endif
-    
-    // Check if we need to refresh based on region change
-    if let lastRegion = lastQueriedRegion {
-      let currentCenter = region.center
-      let lastCenter = lastRegion.center
-      
-      // Calculate change in region (using span as proxy for zoom level)
-      let latChange = abs(region.span.latitudeDelta - lastRegion.span.latitudeDelta) / lastRegion.span.latitudeDelta
-      let lonChange = abs(region.span.longitudeDelta - lastRegion.span.longitudeDelta) / lastRegion.span.longitudeDelta
-      
-      // Calculate change in center position
-      let centerLatChange = abs(currentCenter.latitude - lastCenter.latitude) / lastRegion.span.latitudeDelta
-      let centerLonChange = abs(currentCenter.longitude - lastCenter.longitude) / lastRegion.span.longitudeDelta
-      
-      // Only reload if region changed significantly
-      if latChange < minimumRegionChangeThreshold && 
-         lonChange < minimumRegionChangeThreshold &&
-         centerLatChange < minimumRegionChangeThreshold &&
-         centerLonChange < minimumRegionChangeThreshold {
-        #if DEBUG
-        print("[MapViewModel] Skipping pin reload - region change too small")
-        #endif
-        return
-      }
-    }
-    
-    // Update last queried region
-    lastQueriedRegion = region
-    
-    // Use geographic filtering to load only pins in visible region
-    let center = region.center
-    
+
+    // Remove existing listener
+    pinsListener?.remove()
+
+    // Calculate region bounds for listener
+    let safeCenter = sanitizeCoordinate(region.center)
+
     // Calculate radius based on span (in km)
     // Approximate: 1 degree latitude ≈ 111 km
     let latRadiusKm = (region.span.latitudeDelta / 2.0) * 111.0
-    let lonRadiusKm = (region.span.longitudeDelta / 2.0) * 111.0 * cos(center.latitude * .pi / 180.0)
-    let radiusKm = max(latRadiusKm, lonRadiusKm) * 1.5  // Add 50% buffer
-    
+    let lonRadiusKm = (region.span.longitudeDelta / 2.0) * 111.0 * max(0.0, cos(safeCenter.latitude * .pi / 180.0))
+    var radiusKm = max(latRadiusKm, lonRadiusKm) * 1.5  // Add 50% buffer
+
+    // Clamp to a sane maximum to avoid invalid query bounds
+    let maxQueryRadiusKm = 2000.0
+    radiusKm = min(radiusKm, maxQueryRadiusKm)
+
+    // Calculate approximate bounds (1 degree latitude ≈ 111 km)
+    let latDelta = radiusKm / 111.0
+    let lonDelta = radiusKm / (111.0 * cos(safeCenter.latitude * .pi / 180.0))
+
+    let minLat = safeCenter.latitude - latDelta
+    let maxLat = safeCenter.latitude + latDelta
+    let minLon = safeCenter.longitude - lonDelta
+    let maxLon = safeCenter.longitude + lonDelta
+
     #if DEBUG
-    print("[MapViewModel] Loading pins for region centered at \(center.latitude), \(center.longitude) with radius \(radiusKm) km")
+    print("[MapViewModel] Setting up listener for region: lat [\(minLat), \(maxLat)], lon [\(minLon), \(maxLon)]")
     #endif
-    
-    Task {
-      do {
-        let loadedPins = try await FirestorePins.getPinsInRegion(
-          center: center,
-          radiusKm: radiusKm,
-          limit: 500
-        )
-        
-        await MainActor.run {
-          self.pins = loadedPins
-          #if DEBUG
-          print("[MapViewModel] Successfully loaded \(loadedPins.count) pins in region")
-          #endif
-        }
-      } catch {
+
+    // Set up real-time listener for pins in this region
+    let query = Firestore.firestore().collection("pins")
+      .whereField("latitude", isGreaterThan: minLat)
+      .whereField("latitude", isLessThan: maxLat)
+      .limit(to: 500)
+
+    pinsListener = query.addSnapshotListener { [weak self] snapshot, error in
+      guard let self = self else { return }
+
+      if let error = error {
         #if DEBUG
-        print("[MapViewModel] Error loading pins: \(error.localizedDescription)")
+        print("[MapViewModel] Listener error: \(error.localizedDescription)")
         #endif
-        await MainActor.run {
-          self.showError("Failed to load pins: \(error.localizedDescription)")
+        Task { @MainActor in
+          self.showError("Failed to listen for pins: \(error.localizedDescription)")
         }
+        return
+      }
+
+      guard let documents = snapshot?.documents else {
+        #if DEBUG
+        print("[MapViewModel] No documents in snapshot")
+        #endif
+        return
+      }
+
+      // Process documents and filter by longitude client-side
+      let centerLocation = CLLocation(latitude: safeCenter.latitude, longitude: safeCenter.longitude)
+
+      let pins = documents.compactMap { document -> Pin? in
+        let data = document.data()
+
+        guard let latitude = data["latitude"] as? Double,
+          let longitude = data["longitude"] as? Double,
+          let typeString = data["type"] as? String,
+          let videoURL = data["videoURL"] as? String,
+          let userId = data["userId"] as? String
+        else {
+          return nil
+        }
+
+        // Filter by longitude bounds
+        guard longitude >= minLon && longitude <= maxLon else {
+          return nil
+        }
+
+        // Calculate actual distance to filter by radius
+        let pinLocation = CLLocation(latitude: latitude, longitude: longitude)
+        let distanceKm = centerLocation.distance(from: pinLocation) / 1000.0
+
+        guard distanceKm <= radiusKm else {
+          return nil
+        }
+
+        let coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+        let incidentType = IncidentType.fromFirestoreType(typeString)
+        let zipCode = data["zipCode"] as? String ?? ""
+
+        return Pin(
+          id: document.documentID,
+          coordinate: coordinate,
+          incidentType: incidentType,
+          videoURL: videoURL,
+          userId: userId,
+          zipCode: zipCode
+        )
+      }
+
+      Task { @MainActor in
+        let oldCount = self.pins.count
+        self.pins = pins
+
+        #if DEBUG
+        print("[MapViewModel] Real-time listener updated: \(oldCount) → \(pins.count) pins")
+        #endif
+
+        // Update last queried region
+        self.lastQueriedRegion = self.region
       }
     }
   }
@@ -1220,13 +1309,18 @@ class MapViewModel: NSObject, ObservableObject {
       print("[MapViewModel] Instant pin created successfully - video uploading in background")
       #endif
 
-      // Send instant notifications
+      // Get zip code for the pin location for notifications
+      let pinLocation = CLLocation(latitude: pinCoordinate.latitude, longitude: pinCoordinate.longitude)
+      let pinZipCode = await getCurrentLocationZipCode(from: pinLocation) ?? authManager.currentUserProfile?.originalZipCode ?? ""
+
+      // Send instant notifications with correct zip code
       let instantPin = Pin(
         id: pinId,
         coordinate: pinCoordinate,
         incidentType: incidentType,
         videoURL: "",
-        userId: currentUserId
+        userId: currentUserId,
+        zipCode: pinZipCode
       )
       await sendZipCodeNotifications(for: instantPin)
     }
@@ -1526,11 +1620,21 @@ class MapViewModel: NSObject, ObservableObject {
     print("[MapViewModel] Starting upload process for pin with video: \(draft.videoURL != nil)")
     #endif
 
+    // Reset and initialize upload progress
+    await MainActor.run {
+      uploadProgress = 0
+      activeUploads += 1
+    }
+
     // Check if user is anonymous AND trying to upload a video
     if authState.isAnonymous && draft.videoURL != nil {
       #if DEBUG
       print("[MapViewModel] Anonymous user attempted video upload - blocking")
       #endif
+      await MainActor.run {
+        uploadProgress = 0
+        activeUploads = max(0, activeUploads - 1)
+      }
       showError("Guests cannot upload videos.")
       reportStep = nil  // Dismiss the report sheet
       return
@@ -1548,6 +1652,10 @@ class MapViewModel: NSObject, ObservableObject {
           #if DEBUG
           print("[MapViewModel] ERROR: Video file does not exist at path: \(videoURL.path)")
           #endif
+          await MainActor.run {
+            uploadProgress = 0
+            activeUploads = max(0, activeUploads - 1)
+          }
           showError(
             "Selected video file is no longer available. Please try selecting another video.")
           return
@@ -1555,6 +1663,11 @@ class MapViewModel: NSObject, ObservableObject {
         #if DEBUG
         print("[MapViewModel] Video file exists at: \(videoURL.path)")
         #endif
+        
+        // Set initial progress to show upload has started
+        await MainActor.run {
+          uploadProgress = 0.1
+        }
       } else {
         #if DEBUG
         print("[MapViewModel] No video attached - creating pin without video")
@@ -1590,15 +1703,31 @@ class MapViewModel: NSObject, ObservableObject {
       print("[MapViewModel] Pin saved to Firestore successfully")
       #endif
 
-      // Let the Firestore listener handle adding the pin to the local array
-      // This prevents race conditions where the listener overwrites our local update
+      // The real-time Firestore listener will automatically update the local pins array
+      // when the new pin is added to the database
       #if DEBUG
-      print("[MapViewModel] Waiting for Firestore listener to add pin to local array")
+      print("[MapViewModel] Pin uploaded successfully - real-time listener will show it")
       #endif
 
-      // Send notifications
-      let newPin = draft.makePin(id: pinId, remote: remoteURL)
+      // Send notifications - create pin with the correct zip code
+      var draftWithZip = draft
+      draftWithZip.zipCode = zipCode
+      let newPin = draftWithZip.makePin(id: pinId, remote: remoteURL)
       await sendZipCodeNotifications(for: newPin)
+
+      // Mark upload as complete
+      await MainActor.run {
+        uploadProgress = 1.0
+        activeUploads = max(0, activeUploads - 1)
+        
+        // Clear progress after brief success indication
+        Task {
+          try? await Task.sleep(nanoseconds: 1_000_000_000)  // 1 second
+          await MainActor.run {
+            uploadProgress = 0
+          }
+        }
+      }
 
       reportStep = nil  // Close sheet
       #if DEBUG
@@ -1617,6 +1746,13 @@ class MapViewModel: NSObject, ObservableObject {
         print("[MapViewModel] Error userInfo: \(nsError.userInfo)")
         #endif
       }
+      
+      // Reset progress on error
+      await MainActor.run {
+        uploadProgress = 0
+        activeUploads = max(0, activeUploads - 1)
+      }
+      
       showError("Failed to create pin: \(error.localizedDescription)")
     }
   }
@@ -1928,7 +2064,7 @@ class MapViewModel: NSObject, ObservableObject {
 
   func startReportFlow(at coord: CLLocationCoordinate2D) {
     reportDraft = PinDraft(coordinate: coord)
-    reportStep = .type
+    reportStep = .video
   }
 
   // Method to update a pin's video URL
@@ -1989,45 +2125,38 @@ class MapViewModel: NSObject, ObservableObject {
   func canWatchVideo(for pin: Pin) async -> (canWatch: Bool, shouldPromptPremium: Bool, message: String?) {
     // Get current user profile
     guard let userProfile = authManager.currentUserProfile else {
+      #if DEBUG
+      print("[MapViewModel] Video access denied - no user profile")
+      #endif
       return (false, false, "Please sign in to watch videos")
     }
     
     // Premium users can watch all videos
     if userProfile.isPremium {
+      #if DEBUG
+      print("[MapViewModel] Video access granted - user is premium")
+      #endif
       return (true, false, nil)
     }
     
-    // For non-premium users, get the current device location's zip code
-    guard let currentLocation = userLocation else {
-      return (false, false, "Location needed to verify video access")
+    // Allow videos with empty zip codes (legacy or same-session)
+    if pin.zipCode.isEmpty {
+      #if DEBUG
+      print("[MapViewModel] Video access granted - pin has no zip code (legacy/same-session)")
+      #endif
+      return (true, false, nil)
     }
-    
-    // Use reverse geocoding to get current zip code
-    let currentZipCode = await getCurrentLocationZipCode(from: currentLocation)
+
+    if zipAccessManager.hasAccess(to: pin.zipCode) {
+      #if DEBUG
+      print("[MapViewModel] Video access granted via ZipAccessManager for zip \(pin.zipCode)")
+      #endif
+      return (true, false, nil)
+    }
     
     #if DEBUG
-    print("[MapViewModel] Video access check - User's home zip: \(userProfile.originalZipCode), Current location zip: \(currentZipCode ?? "unknown"), Pin zip: \(pin.zipCode)")
+    print("[MapViewModel] Video access DENIED - pin zip \(pin.zipCode) not in allowed zones")
     #endif
-    
-    // Non-premium users can watch videos if:
-    // 1. Pin is in their home/original zip code, OR
-    // 2. Pin is in a purchased zip code, OR
-    // 3. Pin is in their current location's zip code (if available)
-    
-    // Check home zip code
-    if pin.zipCode == userProfile.originalZipCode {
-      return (true, false, nil)
-    }
-    
-    // Check purchased zip codes
-    if userProfile.purchasedZipCodes.contains(pin.zipCode) {
-      return (true, false, nil)
-    }
-    
-    // Check current location zip code
-    if let currentZip = currentZipCode, pin.zipCode == currentZip {
-      return (true, false, nil)
-    }
     
     // Pin is outside allowed zip codes - offer to purchase this specific zip or upgrade to premium
     return (false, true, "This video is in zip code \(pin.zipCode). Unlock this area or upgrade to Premium for unlimited access.")
@@ -2143,6 +2272,7 @@ extension MapViewModel: CLLocationManagerDelegate {
       #if DEBUG
       print("[MapViewModel] Delegate: Location updated: \(location.coordinate)")
       #endif
+      self.zipAccessManager.updateTravelAccess(with: location)
 
       // Break down complex conditions into separate variables
       let isLatitudeNYC = self.region.center.latitude == 40.7128
@@ -2290,7 +2420,8 @@ extension MapViewModel: CLLocationManagerDelegate {
   }
 }
 
-enum ReportStep: Int, Identifiable, CaseIterable {
-  case type, video, confirm
+enum ReportStep: Int, Identifiable {
+  case video
   var id: Int { rawValue }
 }
+

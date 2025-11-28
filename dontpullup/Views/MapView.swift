@@ -132,6 +132,10 @@ struct MapView: UIViewRepresentable {
   private func applyDisplayStyle(_ mapView: MKMapView) {
     let style = viewModel.mapDisplayStyle
 
+    // Avoid camera/style updates when the view hasn't been laid out yet
+    let size = mapView.bounds.size
+    guard size.width > 0, size.height > 0 else { return }
+
     if mapView.mapType != style.mapType {
       mapView.mapType = style.mapType
     }
@@ -201,6 +205,9 @@ struct MapView: UIViewRepresentable {
   }
 
   func updateUIView(_ view: MKMapView, context: Context) {
+    // Skip updates until the map view has a valid size to prevent flicker
+    guard view.bounds.width > 0, view.bounds.height > 0 else { return }
+
     applyDisplayStyle(view)
 
     // Handle user tracking mode changes
@@ -333,17 +340,15 @@ class Coordinator: NSObject, MKMapViewDelegate {
   }
 
   @objc func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
-    #if DEBUG
-    print("[MapView] Long press detected - state: \(gesture.state.rawValue)")
-    #endif
-
-    // Respond to long-press only when NOT in delete-edit mode
+    // Only process .began state (state 1)
+    // Other states (.changed=2, .ended=3, .cancelled=4, .failed=5) are normal and ignored
     guard gesture.state == .began else {
-      #if DEBUG
-      print("[MapView] Long press ignored - wrong state")
-      #endif
       return
     }
+
+    #if DEBUG
+    print("[MapView] Long press began - processing pin drop")
+    #endif
 
     guard parent.viewModel.isEditMode == false else {
       #if DEBUG
@@ -834,6 +839,7 @@ struct MapViewWithReportSheet: View {
       showingReportVideo: $showingReportVideo,
       currentVideoPlayer: $currentVideoPlayer
     )
+    .frame(minWidth: 1, minHeight: 1)
     .sheet(isPresented: $showingReportVideo) {
       ReportVideoView(
         isPresented: $showingReportVideo,

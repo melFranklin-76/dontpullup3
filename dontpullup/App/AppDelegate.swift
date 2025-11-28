@@ -1,5 +1,4 @@
 import UIKit
-import Firebase
 import FirebaseCore
 import FirebaseAuth
 import FirebaseFirestore
@@ -7,18 +6,12 @@ import FirebaseMessaging
 import UserNotifications
 
 @objc(AppDelegate)
-class AppDelegate: NSObject, UIApplicationDelegate, MessagingDelegate, UNUserNotificationCenterDelegate
-{
+class AppDelegate: UIResponder, UIApplicationDelegate, MessagingDelegate, UNUserNotificationCenterDelegate {
     
     var window: UIWindow?
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        if FirebaseApp.app() == nil {
-            FirebaseApp.configure()
-            print("[AppDelegate] Firebase configured in didFinishLaunchingWithOptions")
-        }
-        
-        // Configure FCM
+        // Configure FCM after Firebase is initialized
         setupFirebaseMessaging(application)
         
         return true
@@ -71,6 +64,11 @@ class AppDelegate: NSObject, UIApplicationDelegate, MessagingDelegate, UNUserNot
     
     func applicationDidBecomeActive(_ application: UIApplication) {
         // Restart any tasks that were paused while the application was inactive
+
+        // Force refresh FCM token when app becomes active to ensure it's current
+        Task {
+            await refreshFCMTokenIfNeeded()
+        }
     }
     
     func applicationWillTerminate(_ application: UIApplication) {
@@ -93,6 +91,18 @@ class AppDelegate: NSObject, UIApplicationDelegate, MessagingDelegate, UNUserNot
     private func updateUserFCMToken(_ token: String) async {
         // Update FCM token in AuthenticationManager
         await AuthenticationManager.shared.updateFCMToken(token)
+    }
+
+    private func refreshFCMTokenIfNeeded() async {
+        print("[AppDelegate] Refreshing FCM token on app activation")
+        
+        do {
+            let token = try await Messaging.messaging().token()
+            print("[AppDelegate] Refreshed FCM token: \(token.prefix(8))...")
+            await updateUserFCMToken(token)
+        } catch {
+            print("[AppDelegate] Failed to refresh FCM token: \(error.localizedDescription)")
+        }
     }
     
     // MARK: - Push Notification Handling
@@ -124,3 +134,4 @@ class AppDelegate: NSObject, UIApplicationDelegate, MessagingDelegate, UNUserNot
         completionHandler()
     }
 }
+

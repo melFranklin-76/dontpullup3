@@ -19,10 +19,25 @@ struct ProfileView: View {
   @State private var isUpdatingZipCode = false
   @State private var zipCodeError = ""
   @State private var showZipCodeError = false
+  @FocusState private var zipFieldFocused: Bool
+  @State private var showZipActionSheet = false
+  @State private var pendingZipCandidate = ""
+  @State private var showZipSuccess = false
+  @State private var zipSuccessMessage = ""
+  @State private var showUpgradePrompt = false
 
   // Computed property for original zip code
   private var originalZipCode: String {
     return authManager.currentUserProfile?.originalZipCode ?? ""
+  }
+
+  private var displayedCurrentZip: String {
+    guard let zip = authManager.currentUserProfile?.zipCode else { return "" }
+    return ZipValidator.displayValue(for: zip)
+  }
+
+  private var displayedHomeZip: String {
+    return ZipValidator.displayValue(for: originalZipCode)
   }
 
   // Premium upgrade state
@@ -146,7 +161,7 @@ struct ProfileView: View {
                 .font(.caption)
                 .foregroundColor(.gray)
 
-              Text(authManager.currentUserProfile?.zipCode ?? "")
+              Text(displayedCurrentZip)
                 .font(.title3)
                 .fontWeight(.bold)
                 .foregroundColor(.white)
@@ -173,7 +188,7 @@ struct ProfileView: View {
                     .frame(width: 24)
                   
                   VStack(alignment: .leading, spacing: 2) {
-                    Text(profile.originalZipCode)
+                    Text(ZipValidator.displayValue(for: profile.originalZipCode))
                       .font(.system(size: 16, weight: .semibold))
                       .foregroundColor(.white)
                     Text("Home Area")
@@ -199,7 +214,7 @@ struct ProfileView: View {
                         .frame(width: 24)
                       
                       VStack(alignment: .leading, spacing: 2) {
-                        Text(zipCode)
+                        Text(ZipValidator.displayValue(for: zipCode))
                           .font(.system(size: 16, weight: .semibold))
                           .foregroundColor(.white)
                         Text("Purchased Area")
@@ -283,23 +298,19 @@ struct ProfileView: View {
               .background(Color.white.opacity(0.1))
               .cornerRadius(8)
               .foregroundColor(.white)
-              .keyboardType(.numberPad)
+              .keyboardType(.numbersAndPunctuation)
+              .textInputAutocapitalization(.characters)
+              .autocorrectionDisabled()
+              .focused($zipFieldFocused)
+              .submitLabel(.done)
               .onChange(of: newZipCode) { newValue in
-                // Limit to 5 digits
-                if newValue.count > 5 {
-                  newZipCode = String(newValue.prefix(5))
-                }
-
-                // Filter non-numeric characters
-                newZipCode = newValue.filter { "0123456789".contains($0) }
+                newZipCode = ZipValidator.cleanInput(newValue)
               }
-              .disabled(!isPremium && newZipCode == originalZipCode)  // Disable if not premium and equals original
-              .opacity(!isPremium ? 0.6 : 1.0)
               .padding(.vertical, 4)
 
             Button(action: {
               if isEditingZipCode {
-                updateZipCode()
+                handleZipSubmission()
               } else {
                 startEditingZipCode()
               }
@@ -314,16 +325,12 @@ struct ProfileView: View {
             }
             .frame(maxWidth: .infinity)
             .padding()
-            .background((!isPremium && newZipCode != originalZipCode) ? Color.gray : Color.blue)
+            .background(Color.blue.opacity(isEditingZipCode ? 1.0 : 0.85))
             .foregroundColor(.white)
             .cornerRadius(8)
-            .disabled(
-              !isPremium && newZipCode != originalZipCode || isUpdatingZipCode
-                || (isEditingZipCode && newZipCode.isEmpty)
-            )
+            .disabled(isUpdatingZipCode || (isEditingZipCode && newZipCode.isEmpty))
             .opacity(
-              (!isPremium && newZipCode != originalZipCode) || isUpdatingZipCode
-                || (isEditingZipCode && newZipCode.isEmpty) ? 0.6 : 1.0)
+              (isUpdatingZipCode || (isEditingZipCode && newZipCode.isEmpty)) ? 0.6 : 1.0)
           }
         }
 
@@ -419,14 +426,60 @@ struct ProfileView: View {
         "You now have premium access! You can now change your zip code to view incidents from anywhere."
       )
     }
+    .alert("Zip Code Updated", isPresented: $showZipSuccess) {
+      Button("OK", role: .cancel) {}
+    } message: {
+      Text(zipSuccessMessage)
+    }
+    .confirmationDialog(
+      "Apply \(ZipValidator.displayValue(for: pendingZipCandidate))",
+      isPresented: $showZipActionSheet, titleVisibility: .visible
+    ) {
+      Button("Set as Home Zip") {
+        performZipAction(.setHome)
+      }
+      Button("Add to Unlocked Areas") {
+        performZipAction(.unlock)
+      }
+      Button("Cancel", role: .cancel) {
+        pendingZipCandidate = ""
+      }
+    } message: {
+      Text("Choose whether to replace your home area or add this zip to your unlocked list.")
+    }
+    .confirmationDialog(
+      "Unlock \(ZipValidator.displayValue(for: pendingZipCandidate))",
+      isPresented: $showUpgradePrompt, titleVisibility: .visible
+    ) {
+      Button("Unlock This ZIP for $0.99") {
+        routeToZipPurchase()
+      }
+      Button("Upgrade to Premium") {
+        showPremiumUpgrade = true
+      }
+      Button("Cancel", role: .cancel) {
+        pendingZipCandidate = ""
+      }
+    } message: {
+      Text("Premium access is required to monitor additional areas. Choose an option to continue.")
+    }
     .sheet(isPresented: $showPremiumUpgrade) {
       PremiumUpgradeView(showSuccess: $showPremiumSuccess)
         .preferredColorScheme(.dark)
     }
+    .toolbar {
+      ToolbarItemGroup(placement: .keyboard) {
+        Spacer()
+        Button("Done") {
+          handleZipSubmission()
+        }
+        .fontWeight(.semibold)
+      }
+    }
     .onAppear {
       // Set current zip code from AuthenticationManager
       if let currentZip = authManager.currentUserProfile?.zipCode {
-        newZipCode = currentZip
+        newZipCode = ZipValidator.displayValue(for: currentZip)
       }
     }
   }
@@ -434,56 +487,77 @@ struct ProfileView: View {
   // Method to start editing zip code
   private func startEditingZipCode() {
     // Set the text field to the current zip code value
-    newZipCode = authManager.currentUserProfile?.zipCode ?? ""
+    newZipCode = displayedCurrentZip
     isEditingZipCode = true
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+      zipFieldFocused = true
+    }
   }
 
-  // Method to update zip code
-  private func updateZipCode() {
-    // Basic validation
-    if newZipCode.isEmpty {
+  // Handle zip submission + validation
+  private func handleZipSubmission() {
+    guard isEditingZipCode else {
+      zipFieldFocused = false
+      return
+    }
+
+    let normalizedInput = ZipValidator.storageValue(for: newZipCode)
+
+    guard !normalizedInput.isEmpty else {
       zipCodeError = "Please enter a zip code"
       showZipCodeError = true
       return
     }
 
-    if newZipCode.count != 5 {
-      zipCodeError = "Zip code must be 5 digits"
+    guard ZipValidator.isValidNorthAmericanZip(normalizedInput) else {
+      zipCodeError = "Enter a valid U.S. ZIP or Canadian postal code."
       showZipCodeError = true
       return
     }
 
-    // Show loading state
-    isUpdatingZipCode = true
+    pendingZipCandidate = normalizedInput
+    newZipCode = ZipValidator.displayValue(for: normalizedInput)
 
-    // Use AuthenticationManager's method which handles premium validation
-    #if DEBUG
-    print("[ProfileView] Attempting to update zip code to: \(newZipCode)")
-    print("[ProfileView] Current user premium status: \(isPremium)")
-    #endif
+    guard isPremium else {
+      if normalizedInput == originalZipCode {
+        pendingZipCandidate = ""
+        finishZipEditing()
+      } else {
+        pendingZipCandidate = normalizedInput
+        zipFieldFocused = false
+        showUpgradePrompt = true
+      }
+      return
+    }
+
+    zipFieldFocused = false
+    showZipActionSheet = true
+  }
+
+  private func performZipAction(_ action: ZipAction) {
+    guard !pendingZipCandidate.isEmpty else { return }
+    isUpdatingZipCode = true
+    let targetZip = pendingZipCandidate
 
     Task {
       do {
-        #if DEBUG
-        print("[ProfileView] Calling authManager.updateZipCode(\(newZipCode))")
-        #endif
-        try await authManager.updateZipCode(newZipCode)
+        switch action {
+        case .setHome:
+          try await authManager.updateHomeZipCode(targetZip)
+          zipSuccessMessage = "Home zip updated to \(ZipValidator.displayValue(for: targetZip))."
+        case .unlock:
+          try await authManager.addUnlockedZipCode(targetZip)
+          zipSuccessMessage = "\(ZipValidator.displayValue(for: targetZip)) added to unlocked areas."
+        }
 
-        // Update UI on main thread
         await MainActor.run {
-          #if DEBUG
-          print("[ProfileView] Zip code update successful")
-          print("[ProfileView] New current zip code: \(authManager.currentUserProfile?.zipCode ?? "unknown")")
-          #endif
-          // Update the local state to reflect the new zip code
-          if let updatedZip = authManager.currentUserProfile?.zipCode {
-            newZipCode = updatedZip
-          }
-          isEditingZipCode = false
+          showZipSuccess = true
           isUpdatingZipCode = false
+          isEditingZipCode = false
+          pendingZipCandidate = ""
+          newZipCode = ZipValidator.displayValue(for: targetZip)
         }
       } catch {
-        // Handle error
         await MainActor.run {
           zipCodeError = error.localizedDescription
           showZipCodeError = true
@@ -491,6 +565,20 @@ struct ProfileView: View {
         }
       }
     }
+  }
+
+  private func finishZipEditing() {
+    isEditingZipCode = false
+    zipFieldFocused = false
+  }
+
+  private func routeToZipPurchase() {
+    NotificationCenter.default.post(
+      name: NSNotification.Name("ShowZipCodePurchase"),
+      object: nil,
+      userInfo: ["zip": pendingZipCandidate]
+    )
+    pendingZipCandidate = ""
   }
 
   // Method to delete user account
@@ -553,6 +641,11 @@ struct ProfileView: View {
     for document in querySnapshot.documents {
       try await document.reference.delete()
     }
+  }
+
+  private enum ZipAction {
+    case setHome
+    case unlock
   }
 }
 
@@ -729,6 +822,84 @@ struct StatView: View {
         .foregroundColor(.gray)
     }
     .frame(minWidth: 70)  // Ensure stat views have consistent width
+  }
+}
+
+private enum ZipValidator {
+  private static let canadianPostalPattern =
+    "^[ABCEGHJKLMNPRSTVXY][0-9][ABCEGHJ-NPRSTV-Z][0-9][ABCEGHJ-NPRSTV-Z][0-9]$"
+
+  static func cleanInput(_ input: String) -> String {
+    let uppercase = input.uppercased()
+    let alphanumerics = uppercase.filter { $0.isLetter || $0.isNumber }
+
+    if alphanumerics.isEmpty {
+      return ""
+    }
+
+    if alphanumerics.allSatisfy(\.isNumber) {
+      let digits = String(alphanumerics.prefix(9))
+      if digits.count > 5 {
+        let prefix = digits.prefix(5)
+        let suffix = digits.dropFirst(5)
+        return suffix.isEmpty ? String(prefix) : "\(prefix)-\(suffix)"
+      }
+      return digits
+    }
+
+    let lettersDigits = String(alphanumerics.prefix(6))
+    if lettersDigits.count <= 3 {
+      return lettersDigits
+    }
+    let prefix = lettersDigits.prefix(3)
+    let suffix = lettersDigits.dropFirst(3)
+    return suffix.isEmpty ? String(prefix) : "\(prefix) \(suffix)"
+  }
+
+  static func storageValue(for displayValue: String) -> String {
+    return displayValue.uppercased().filter { $0.isLetter || $0.isNumber }
+  }
+
+  static func displayValue(for rawValue: String) -> String {
+    let normalized = storageValue(for: rawValue)
+    guard !normalized.isEmpty else { return "" }
+
+    if normalized.allSatisfy(\.isNumber) {
+      if normalized.count > 5 {
+        let prefix = normalized.prefix(5)
+        let suffix = normalized.dropFirst(5)
+        let clippedSuffix = suffix.prefix(4)
+        return clippedSuffix.isEmpty ? String(prefix) : "\(prefix)-\(clippedSuffix)"
+      }
+      return normalized
+    }
+
+    if normalized.count >= 6 {
+      let prefix = normalized.prefix(3)
+      let suffix = normalized.dropFirst(3).prefix(3)
+      return "\(prefix) \(suffix)"
+    }
+
+    return normalized
+  }
+
+  static func isValidNorthAmericanZip(_ rawInput: String) -> Bool {
+    let normalized = storageValue(for: rawInput)
+    guard !normalized.isEmpty else { return false }
+
+    if normalized.allSatisfy(\.isNumber) {
+      return normalized.count == 5 || normalized.count == 9
+    }
+
+    return matches(pattern: canadianPostalPattern, in: normalized)
+  }
+
+  private static func matches(pattern: String, in text: String) -> Bool {
+    guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+      return false
+    }
+    let range = NSRange(location: 0, length: text.count)
+    return regex.firstMatch(in: text, options: [], range: range) != nil
   }
 }
 

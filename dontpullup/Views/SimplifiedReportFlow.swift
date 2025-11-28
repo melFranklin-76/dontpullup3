@@ -27,12 +27,9 @@ struct IncidentPickerView: View {
       HStack(spacing: 25) {
         ForEach(IncidentType.allCases, id: \.self) { type in
           Button {
-            // When incident type is selected:
-            // 1. Save the type to the draft
-            viewModel.reportDraft.incidentType = type
-            // 2. Dismiss this sheet
+            // Save the type and move into the video/photo flow
+            viewModel.beginVideoCaptureFlow(for: type)
             dismiss()
-            // 3. Present the photo picker (this is called from the parent view)
           } label: {
             VStack(spacing: 8) {
               Text(type.emoji)

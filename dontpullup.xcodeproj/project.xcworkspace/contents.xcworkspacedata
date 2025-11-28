@@ -4,4 +4,19 @@
    <FileRef
       location = "self:">
    </FileRef>
+   <FileRef
+      location = "group:Info.plist">
+   </FileRef>
+   <FileRef
+      location = "group:DontPullUpPush-Release.entitlements">
+   </FileRef>
+   <FileRef
+      location = "group:PrivacyInfo.xcprivacy">
+   </FileRef>
+   <FileRef
+      location = "group:PrivacyInfo 2.xcprivacy">
+   </FileRef>
+   <FileRef
+      location = "group:SUBMISSION_CHECKLIST.md">
+   </FileRef>
 </Workspace>

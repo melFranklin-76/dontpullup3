@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import FirebaseFirestore
 import FirebaseAuth
@@ -8,12 +9,35 @@ import FirebaseFunctions
 class NotificationManager: ObservableObject {
     static let shared = NotificationManager()
     
-    private let db = Firestore.firestore()
-    private let functions = Functions.functions()
+    private lazy var db: Firestore = { Firestore.firestore() }()
+    private lazy var functions: Functions = { Functions.functions() }()
     private let baseURL = "https://fcm.googleapis.com/fcm/send"
     private let presenceFreshnessInterval: TimeInterval = 10 * 60  // 10 minutes window for live presence
+    private let zipAccessManager = ZipAccessManager.shared
+    @Published private(set) var accessibleZipCodes: Set<String> = []
     
-    private init() {}
+    private var cancellables = Set<AnyCancellable>()
+    
+    private init() {
+        accessibleZipCodes = zipAccessManager.effectiveAccessZIPs
+        zipAccessManager.$effectiveAccessZIPs
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] newSet in
+                self?.accessibleZipCodes = newSet
+            }
+            .store(in: &cancellables)
+        
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleZipAccessStateChanged),
+            name: .zipAccessStateDidChange,
+            object: nil
+        )
+    }
+    
+    deinit {
+        NotificationCenter.default.removeObserver(self, name: .zipAccessStateDidChange, object: nil)
+    }
     
     /// Sends notification to all users in the same zip code when a pin is dropped
     /// - Parameters:
@@ -53,7 +77,12 @@ class NotificationManager: ObservableObject {
             print("[NotificationManager] Users fetched for notification:")
             for user in usersToNotify {
                 if let token = user.fcmToken, !token.isEmpty {
-                    print("  - User ID: \(user.id), Email: \(user.email), FCM Token: valid")
+                    let tokenLength = token.count
+                    let isValidLength = tokenLength >= 100
+                    print("  - User ID: \(user.id), Email: \(user.email), FCM Token: valid (\(tokenLength) chars, valid length: \(isValidLength))")
+                    if !isValidLength {
+                        print("    ⚠️ WARNING: Token length \(tokenLength) may indicate stale token")
+                    }
                 } else {
                     print("  - User ID: \(user.id), Email: \(user.email), FCM Token: MISSING or EMPTY - user will be skipped for push notification")
                 }
@@ -62,14 +91,22 @@ class NotificationManager: ObservableObject {
             if usersToNotify.isEmpty {
                 print("[NotificationManager] No users to notify in zip code: \(zipCode)")
                 print("[NotificationManager] Finished notifying users for pin ID: \(pin.id) in zip code: \(zipCode)")
+
+                // Send test notification to verify notification system works
+                await sendLocalTestNotification(for: pin)
                 return
             }
             
-            // Collect all valid FCM tokens for production push notification
+            // Validate FCM tokens and collect valid ones for production push notification
             var tokenToUserId: [String: String] = [:]
             for user in usersToNotify {
                 if let token = user.fcmToken, !token.isEmpty {
-                    tokenToUserId[token] = user.id
+                    // Basic token validation (FCM tokens are typically 140+ characters)
+                    if token.count >= 100 {
+                        tokenToUserId[token] = user.id
+                    } else {
+                        print("[NotificationManager] Skipped user \(user.id) - FCM token appears invalid (too short)")
+                    }
                 }
             }
             let recipientTokens = Array(tokenToUserId.keys)
@@ -82,9 +119,12 @@ class NotificationManager: ObservableObject {
                 return
             }
             
+            // Validate FCM tokens before sending (ensure current user has valid token)
+            await AuthenticationManager.shared.validateAndRefreshFCMToken()
+
             // Create notification payload
             let notificationData = createNotificationPayload(for: pin)
-            
+
             // PRODUCTION PUSH NOTIFICATION: send via Cloud Function to all recipients
             await sendPushNotification(
                 to: recipientTokens,
@@ -266,35 +306,42 @@ class NotificationManager: ObservableObject {
     }
 
     private func handleFailedTokens(responses: [[String: Any]], tokenToUserId: [String: String]) async {
+        // Build a stable ordered array of tokens to match response indices
+        let orderedTokens = Array(tokenToUserId.keys)
         var tokensToRemove: [(token: String, userId: String)] = []
-        
-        for (index, response) in responses.enumerated() {
-            guard index < tokenToUserId.keys.count else { continue }
 
+        for (index, response) in responses.enumerated() {
+            guard index < orderedTokens.count else { continue }
+
+            // Success == 1 means this index succeeded; skip
             if let success = response["success"] as? Int, success == 1 {
                 continue
             }
-            
+
+            // Extract error string and match the specific FCM error we care about
             if let errorMessage = response["error"] as? String,
                errorMessage == "Requested entity was not found." {
-                let token = Array(tokenToUserId.keys)[index]
+                let token = orderedTokens[index]
                 if let userId = tokenToUserId[token] {
                     tokensToRemove.append((token, userId))
                 }
             }
         }
-        
+
         guard !tokensToRemove.isEmpty else { return }
-        
+
+        // IMPORTANT: Do not attempt to modify other users' documents from the client.
+        // Defer cleanup to a privileged Cloud Function instead.
+        print("[NotificationManager] Token cleanup should be handled server-side. Invalid tokens detected: \(tokensToRemove.map { $0.token.prefix(8) }) for users: \(tokensToRemove.map { $0.userId })")
+
         do {
-            for entry in tokensToRemove {
-                try await db.collection("users").document(entry.userId).updateData([
-                    "fcmToken": FieldValue.delete()
-                ])
-                print("[NotificationManager] Removed stale FCM token for user \(entry.userId)")
-            }
+            let payload: [String: Any] = [
+                "invalidTokens": tokensToRemove.map { ["token": $0.token, "userId": $0.userId] }
+            ]
+            _ = try await functions.httpsCallable("cleanupInvalidTokens").call(payload)
+            print("[NotificationManager] Requested server-side cleanup for \(tokensToRemove.count) token(s)")
         } catch {
-            print("[NotificationManager] Error removing stale tokens: \(error.localizedDescription)")
+            print("[NotificationManager] Failed to request server-side cleanup: \(error.localizedDescription)")
         }
     }
     
@@ -305,6 +352,11 @@ class NotificationManager: ObservableObject {
     
     /// Sends a local notification for testing when no other users exist
     private func sendLocalTestNotification(for pin: Pin) async {
+        guard currentUserCanReceiveLocalNotification(for: pin.zipCode) else {
+            print("[NotificationManager] Skipping local test notification - zip \(pin.zipCode) not accessible for current user")
+            return
+        }
+        
         let title = "Test: Pin Created"
         let body = "Your \(pin.incidentType.title) pin was created successfully. (This is a test notification since no other users are in your zip code)"
         
@@ -375,6 +427,17 @@ class NotificationManager: ObservableObject {
             print("[NotificationManager] Error scheduling local notification: \(error.localizedDescription)")
         }
     }
+    
+    @objc private func handleZipAccessStateChanged() {
+        #if DEBUG
+        print("[NotificationManager] zip access set updated: \(accessibleZipCodes.sorted())")
+        #endif
+    }
+    
+    private func currentUserCanReceiveLocalNotification(for zipCode: String) -> Bool {
+        guard !zipCode.isEmpty else { return true }
+        return zipAccessManager.hasAccess(to: zipCode)
+    }
 }
 
 // MARK: - Notification Payload Model
@@ -405,3 +468,4 @@ extension IncidentType {
         }
     }
 } 
+

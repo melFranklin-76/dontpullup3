@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		1E1FEDFB2DC95C77006F88D9 /* FirebaseCore in Frameworks */ = {isa = PBXBuildFile; productRef = 1E1FEDFA2DC95C77006F88D9 /* FirebaseCore */; };
+		1E55855C2ECA9AAC00F57F4B /* PLIST_PERMISSION_STRINGS.README.md in Resources */ = {isa = PBXBuildFile; fileRef = 1E55855B2ECA9AAC00F57F4B /* PLIST_PERMISSION_STRINGS.README.md */; };
 		1E5F5B422EBAA0BA00A12E35 /* DeveloperNotes.md in Resources */ = {isa = PBXBuildFile; fileRef = 1E5F5B412EBAA0BA00A12E35 /* DeveloperNotes.md */; };
 		1E6973092DE1B5DF006896A1 /* FirebaseMessaging in Frameworks */ = {isa = PBXBuildFile; productRef = 1E6973082DE1B5DF006896A1 /* FirebaseMessaging */; };
 		1EDE62F22DC739D000B165D7 /* KeychainAccess in Frameworks */ = {isa = PBXBuildFile; productRef = 1EDE62F12DC739D000B165D7 /* KeychainAccess */; };
@@ -22,11 +23,15 @@
 
 /* Begin PBXFileReference section */
 		1E0850F72DC7325B0060E683 /* Dontpullup.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Dontpullup.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		1E5584B32ECA904D00F57F4B /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		1E5585582ECA9AA500F57F4B /* PrivacyInfo 2.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = "PrivacyInfo 2.xcprivacy"; sourceTree = "<group>"; };
+		1E55855A2ECA9AA500F57F4B /* DontPullUpPush.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = DontPullUpPush.entitlements; sourceTree = "<group>"; };
+		1E55855B2ECA9AAC00F57F4B /* PLIST_PERMISSION_STRINGS.README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = PLIST_PERMISSION_STRINGS.README.md; sourceTree = "<group>"; };
 		1E5F5B412EBAA0BA00A12E35 /* DeveloperNotes.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = DeveloperNotes.md; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		1E7DFB5B2EC9B6D60037F343 /* Exceptions for "Dontpullup" folder in "Dontpullup" target */ = {
+		1E304A882ED8F51E000098AD /* Exceptions for "Dontpullup" folder in "Dontpullup" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
@@ -39,7 +44,7 @@
 		1E0850F92DC7325B0060E683 /* Dontpullup */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
-				1E7DFB5B2EC9B6D60037F343 /* Exceptions for "Dontpullup" folder in "Dontpullup" target */,
+				1E304A882ED8F51E000098AD /* Exceptions for "Dontpullup" folder in "Dontpullup" target */,
 			);
 			path = Dontpullup;
 			sourceTree = "<group>";
@@ -73,6 +78,10 @@
 				1E0850F92DC7325B0060E683 /* Dontpullup */,
 				1E0850F82DC7325B0060E683 /* Products */,
 				1E5F5B412EBAA0BA00A12E35 /* DeveloperNotes.md */,
+				1E5584B32ECA904D00F57F4B /* PrivacyInfo.xcprivacy */,
+				1E5585582ECA9AA500F57F4B /* PrivacyInfo 2.xcprivacy */,
+				1E55855A2ECA9AA500F57F4B /* DontPullUpPush.entitlements */,
+				1E55855B2ECA9AAC00F57F4B /* PLIST_PERMISSION_STRINGS.README.md */,
 			);
 			sourceTree = "<group>";
 		};
@@ -163,6 +172,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				1E5F5B422EBAA0BA00A12E35 /* DeveloperNotes.md in Resources */,
+				1E5584B42ECA904E00F57F4B /* PrivacyInfo.xcprivacy in Resources */,
+				1E5585592ECA9AA500F57F4B /* PrivacyInfo 2.xcprivacy in Resources */,
+				1E55855C2ECA9AAC00F57F4B /* PLIST_PERMISSION_STRINGS.README.md in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

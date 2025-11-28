@@ -132,7 +132,7 @@ struct PremiumView: View {
 
         // Price display for premium unlimited
         Group {
-          if let product = premiumManager.products.first(where: { $0.id == "com.dontpullup.app.premium_unlimited" }) {
+          if let product = premiumManager.products.first(where: { $0.id == PremiumManager.premiumUnlimitedProductID }) {
             Text("\(product.displayPrice)")
               .font(.title2)
               .fontWeight(.bold)

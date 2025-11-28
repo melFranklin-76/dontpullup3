@@ -1,5 +1,5 @@
 [project]
-root = "/Users/melfranklin/Desktop/untitled folder/Dontpullup 3"
+root = "."
 ignore = ["../*", "/.*"]
 
 # 1) Async calls must use await
@@ -35,36 +35,4 @@ action = "suggest_wrap_MainActor"
 scope = "**/*.swift"
 pattern = ""
 message = "Run test_dependency_checker.sh to verify cross-file dependencies"
-action = "run_script test_dependency_checker.sh"
-
-#!/usr/bin/env python3
-import os, sys, json, subprocess
-
-# Load dependency map
-deps = json.load(open('cursor/dependencies.json'))
-
-# Get list of changed files from environment or args
-changed = os.getenv('CURSOR_CHANGED_FILES', '').split(',')
-to_check = set()
-
-for f in changed:
-    base = os.path.basename(f)
-    if base in deps:
-        to_check.update(deps[base])
-
-# Always check the changed files too
-to_check.update(changed)
-
-# Run SwiftLint on all files in to_check
-errors = []
-for f in to_check:
-    res = subprocess.run([
-        'swiftlint', 'lint', '--config', '.cursor/swiftlint_async.yml', '--path', f
-    ], capture_output=True, text=True)
-    if res.returncode != 0:
-        errors.append(res.stdout)
-
-if errors:
-    print('Dependency checks failed:')
-    print('\n'.join(errors))
-    sys.exit(1)
+action = "run_script python3 .cursor/dependency_checker.py"

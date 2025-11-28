@@ -1,17 +1,15 @@
 import Firebase
 import FirebaseFirestore
 
-// Make this public to avoid redeclaration issues
 public final class FirebaseManager {
     public static let shared = FirebaseManager()
-    private let db: Firestore
     
-    private init() {
-        if FirebaseApp.app() == nil {
-            FirebaseApp.configure()
-        }
-        self.db = Firestore.firestore()
-    }
+    private init() {}
+    
+    private lazy var db: Firestore = {
+        // Assumes FirebaseApp.configure() has already been called in DontpullupApp.init()
+        return Firestore.firestore()
+    }()
     
     public func firestore() -> Firestore { db }
 }
