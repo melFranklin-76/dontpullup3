@@ -8,6 +8,21 @@ import Network
 import SwiftUI
 import UIKit
 
+/// Thread-safe flag to prevent continuation from being resumed multiple times
+private final class AtomicFlag: @unchecked Sendable {
+  private var _value: Bool = false
+  private let lock = NSLock()
+  
+  /// Attempts to set the flag to true. Returns true if successful (was false), false if already set.
+  func trySet() -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    if _value { return false }
+    _value = true
+    return true
+  }
+}
+
 /// Utility class for handling Firebase Storage uploads
 enum StorageUploader {
 
@@ -323,65 +338,75 @@ enum StorageUploader {
           }
         }
 
-        // Create a task to handle the upload completion
+      // Thread-safe flag to ensure continuation is only resumed once
+      let hasResumed = AtomicFlag()
+      var successHandle: String?
+      var failureHandle: String?
+      
+      successHandle = uploadTask.observe(.success) { snapshot in
+        guard hasResumed.trySet() else { return }
+        
+        // Remove all observers immediately
+        uploadTask.removeObserver(withHandle: progressHandle)
+        if let sh = successHandle { uploadTask.removeObserver(withHandle: sh) }
+        if let fh = failureHandle { uploadTask.removeObserver(withHandle: fh) }
+        
+        // Handle success in a Task to allow async operations
         Task {
           do {
-            // Wait for the upload to complete using a continuation-based approach
-            let snapshot = await withCheckedContinuation {
-              (continuation: CheckedContinuation<StorageTaskSnapshot, Never>) in
-              uploadTask.observe(.success) { snapshot in
-                continuation.resume(returning: snapshot)
-              }
-
-              uploadTask.observe(.failure) { snapshot in
-                continuation.resume(returning: snapshot)
-              }
-            }
-
-            // Check for errors
-            if let error = snapshot.error {
-              throw error
-            }
-
-            // Remove the progress observer
-            uploadTask.removeObserver(withHandle: progressHandle)
-
             // Log upload time
             print("[StorageUploader] GIF Upload completed")
-
+            
             // Clean up temporary files
             try? FileManager.default.removeItem(at: compressedURL)
             try? FileManager.default.removeItem(at: gifURL)
-
+            
             // Get the download URL
             let downloadURL = try await storageRef.downloadURL()
             print("[StorageUploader] Got GIF download URL: \(downloadURL.absoluteString)")
-
+            
             // End background task
             if taskID != .invalid {
               await UIApplication.shared.endBackgroundTask(taskID)
             }
-
+            
             continuation.resume(returning: downloadURL.absoluteString)
           } catch {
-            // Remove the progress observer
-            uploadTask.removeObserver(withHandle: progressHandle)
-
-            // Clean up temporary files
-            try? FileManager.default.removeItem(at: compressedURL)
-            try? FileManager.default.removeItem(at: gifURL)
-
-            print("[StorageUploader] Upload failed with error: \(error)")
-
             // End background task in case of error
             if taskID != .invalid {
               await UIApplication.shared.endBackgroundTask(taskID)
             }
-
             continuation.resume(throwing: error)
           }
         }
       }
+      
+      failureHandle = uploadTask.observe(.failure) { snapshot in
+        guard hasResumed.trySet() else { return }
+        
+        // Remove all observers immediately
+        uploadTask.removeObserver(withHandle: progressHandle)
+        if let sh = successHandle { uploadTask.removeObserver(withHandle: sh) }
+        if let fh = failureHandle { uploadTask.removeObserver(withHandle: fh) }
+        
+        // Clean up temporary files
+        try? FileManager.default.removeItem(at: compressedURL)
+        try? FileManager.default.removeItem(at: gifURL)
+        
+        let error = snapshot.error ?? NSError(domain: "StorageUploader", code: -1, 
+          userInfo: [NSLocalizedDescriptionKey: "GIF upload failed"])
+        print("[StorageUploader] GIF Upload failed with error: \(error)")
+        
+        // End background task in case of error
+        Task {
+          if taskID != .invalid {
+            await UIApplication.shared.endBackgroundTask(taskID)
+          }
+        }
+        
+        continuation.resume(throwing: error)
+      }
+    }
 
       return result
     }
@@ -458,65 +483,75 @@ enum StorageUploader {
         }
       }
 
-      // Create a task to handle the upload completion
-      Task {
-        do {
-          // Wait for the upload to complete using a continuation-based approach
-          let snapshot = await withCheckedContinuation {
-            (continuation: CheckedContinuation<StorageTaskSnapshot, Never>) in
-            uploadTask.observe(.success) { snapshot in
-              continuation.resume(returning: snapshot)
+      // Thread-safe flag to ensure continuation is only resumed once
+      let hasResumed = AtomicFlag()
+      var successHandle: String?
+      var failureHandle: String?
+      
+      successHandle = uploadTask.observe(.success) { snapshot in
+        guard hasResumed.trySet() else { return }
+        
+        // Remove all observers immediately
+        uploadTask.removeObserver(withHandle: progressHandle)
+        if let sh = successHandle { uploadTask.removeObserver(withHandle: sh) }
+        if let fh = failureHandle { uploadTask.removeObserver(withHandle: fh) }
+        
+        // Handle success in a Task to allow async operations
+        Task {
+          do {
+            // Log upload time
+            let uploadEnd = Date()
+            let uploadTime = uploadEnd.timeIntervalSince(uploadStart)
+            print(
+              "[StorageUploader] Upload completed in \(String(format: "%.2f", uploadTime)) seconds")
+            
+            // Clean up temporary compressed file
+            try? FileManager.default.removeItem(at: compressedURL)
+            
+            // Get the download URL
+            let downloadURL = try await storageRef.downloadURL()
+            print("[StorageUploader] Got download URL: \(downloadURL.absoluteString)")
+            
+            // End background task
+            if taskID != .invalid {
+              await UIApplication.shared.endBackgroundTask(taskID)
             }
-
-            uploadTask.observe(.failure) { snapshot in
-              continuation.resume(returning: snapshot)
+            
+            continuation.resume(returning: downloadURL.absoluteString)
+          } catch {
+            // End background task in case of error
+            if taskID != .invalid {
+              await UIApplication.shared.endBackgroundTask(taskID)
             }
+            continuation.resume(throwing: error)
           }
-
-          // Check for errors
-          if let error = snapshot.error {
-            throw error
-          }
-
-          // Remove the progress observer
-          uploadTask.removeObserver(withHandle: progressHandle)
-
-          // Log upload time
-          let uploadEnd = Date()
-          let uploadTime = uploadEnd.timeIntervalSince(uploadStart)
-          print(
-            "[StorageUploader] Upload completed in \(String(format: "%.2f", uploadTime)) seconds")
-
-          // Clean up temporary compressed file
-          try? FileManager.default.removeItem(at: compressedURL)
-
-          // Get the download URL
-          let downloadURL = try await storageRef.downloadURL()
-          print("[StorageUploader] Got download URL: \(downloadURL.absoluteString)")
-
-          // End background task
-          if taskID != .invalid {
-            await UIApplication.shared.endBackgroundTask(taskID)
-          }
-
-          continuation.resume(returning: downloadURL.absoluteString)
-        } catch {
-          // Remove the progress observer
-          uploadTask.removeObserver(withHandle: progressHandle)
-
-          // Clean up temporary compressed file
-          try? FileManager.default.removeItem(at: compressedURL)
-
-          print("[StorageUploader] Upload failed with error: \(error)")
-
-          // End background task in case of error
-          if taskID != .invalid {
-            await UIApplication.shared.endBackgroundTask(taskID)
-          }
-
-          continuation.resume(throwing: error)
         }
-    }
+      }
+      
+      failureHandle = uploadTask.observe(.failure) { snapshot in
+        guard hasResumed.trySet() else { return }
+        
+        // Remove all observers immediately
+        uploadTask.removeObserver(withHandle: progressHandle)
+        if let sh = successHandle { uploadTask.removeObserver(withHandle: sh) }
+        if let fh = failureHandle { uploadTask.removeObserver(withHandle: fh) }
+        
+        // Clean up temporary compressed file
+        try? FileManager.default.removeItem(at: compressedURL)
+        
+        let error = snapshot.error ?? NSError(domain: "StorageUploader", code: -1, 
+          userInfo: [NSLocalizedDescriptionKey: "Upload failed"])
+        print("[StorageUploader] Upload failed with error: \(error)")
+        
+        // End background task in case of error
+        Task {
+          if taskID != .invalid {
+            await UIApplication.shared.endBackgroundTask(taskID)
+          }
+        }
+        
+        continuation.resume(throwing: error)
+      }
     }
 
   }
@@ -583,8 +618,19 @@ enum StorageUploader {
         metadata.contentType = "application/octet-stream"
 
         let uploadTask = chunkRef.putData(chunkData, metadata: metadata)
+        
+        // Thread-safe flag to ensure continuation is only resumed once
+        let hasResumed = AtomicFlag()
+        var successHandle: String?
+        var failureHandle: String?
 
-        uploadTask.observe(.success) { _ in
+        successHandle = uploadTask.observe(.success) { _ in
+          guard hasResumed.trySet() else { return }
+          
+          // Remove observers
+          if let sh = successHandle { uploadTask.removeObserver(withHandle: sh) }
+          if let fh = failureHandle { uploadTask.removeObserver(withHandle: fh) }
+          
           uploadedChunks += 1
           let progress = Double(uploadedChunks) / Double(chunksCount) * 100
           print(
@@ -600,7 +646,13 @@ enum StorageUploader {
           continuation.resume()
         }
 
-        uploadTask.observe(.failure) { snapshot in
+        failureHandle = uploadTask.observe(.failure) { snapshot in
+          guard hasResumed.trySet() else { return }
+          
+          // Remove observers
+          if let sh = successHandle { uploadTask.removeObserver(withHandle: sh) }
+          if let fh = failureHandle { uploadTask.removeObserver(withHandle: fh) }
+          
           if let error = snapshot.error {
             continuation.resume(throwing: error)
           } else {
@@ -634,8 +686,19 @@ enum StorageUploader {
     let downloadURL = try await withCheckedThrowingContinuation {
       (continuation: CheckedContinuation<URL, Error>) in
       let uploadTask = finalRef.putData(data, metadata: metadata)
+      
+      // Thread-safe flag to ensure continuation is only resumed once
+      let hasResumed = AtomicFlag()
+      var successHandle: String?
+      var failureHandle: String?
 
-      uploadTask.observe(.success) { _ in
+      successHandle = uploadTask.observe(.success) { _ in
+        guard hasResumed.trySet() else { return }
+        
+        // Remove observers
+        if let sh = successHandle { uploadTask.removeObserver(withHandle: sh) }
+        if let fh = failureHandle { uploadTask.removeObserver(withHandle: fh) }
+        
         // Get download URL after successful upload
         finalRef.downloadURL { url, error in
           if let error = error {
@@ -653,7 +716,13 @@ enum StorageUploader {
         }
       }
 
-      uploadTask.observe(.failure) { snapshot in
+      failureHandle = uploadTask.observe(.failure) { snapshot in
+        guard hasResumed.trySet() else { return }
+        
+        // Remove observers
+        if let sh = successHandle { uploadTask.removeObserver(withHandle: sh) }
+        if let fh = failureHandle { uploadTask.removeObserver(withHandle: fh) }
+        
         if let error = snapshot.error {
           continuation.resume(throwing: error)
         } else {
@@ -879,7 +948,18 @@ enum StorageUploader {
 
     // Return a URL when complete
     return try await withCheckedThrowingContinuation { continuation in
-      uploadTask.observe(.success) { snapshot in
+      // Thread-safe flag to ensure continuation is only resumed once
+      let hasResumed = AtomicFlag()
+      var successHandle: String?
+      var failureHandle: String?
+      
+      successHandle = uploadTask.observe(.success) { snapshot in
+        guard hasResumed.trySet() else { return }
+        
+        // Remove observers
+        if let sh = successHandle { uploadTask.removeObserver(withHandle: sh) }
+        if let fh = failureHandle { uploadTask.removeObserver(withHandle: fh) }
+        
         // Get download URL
         videoRef.downloadURL { url, error in
           if let error = error {
@@ -902,10 +982,23 @@ enum StorageUploader {
         }
       }
 
-      uploadTask.observe(.failure) { snapshot in
+      failureHandle = uploadTask.observe(.failure) { snapshot in
+        guard hasResumed.trySet() else { return }
+        
+        // Remove observers
+        if let sh = successHandle { uploadTask.removeObserver(withHandle: sh) }
+        if let fh = failureHandle { uploadTask.removeObserver(withHandle: fh) }
+        
         if let error = snapshot.error {
           print("[StorageUploader] Upload failed: \(error)")
           continuation.resume(throwing: error)
+        } else {
+          continuation.resume(
+            throwing: NSError(
+              domain: "StorageUploader",
+              code: -1,
+              userInfo: [NSLocalizedDescriptionKey: "Unknown upload error"]
+            ))
         }
       }
     }

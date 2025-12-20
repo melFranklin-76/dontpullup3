@@ -14,11 +14,24 @@ struct MapContentWrapper: View {
             )
             .edgesIgnoringSafeArea(.all)
             
-            // Upload progress overlay
-            if viewModel.uploadProgress > 0 && viewModel.uploadProgress < 1.0 {
-                UploadProgressOverlay(viewModel: viewModel)
-                    .transition(.opacity)
-                    .animation(.easeInOut(duration: 0.3), value: viewModel.uploadProgress)
+            // Upload progress overlay (pin uploads or perspective uploads)
+            let isPinUploading = viewModel.uploadProgress > 0 && viewModel.uploadProgress < 1.0
+            let isPerspectiveUploading = viewModel.isUploadingPerspective
+              && viewModel.perspectiveUploadProgress > 0
+              && viewModel.perspectiveUploadProgress < 1.0
+            
+            if isPinUploading || isPerspectiveUploading {
+                let progress = isPerspectiveUploading ? viewModel.perspectiveUploadProgress : viewModel.uploadProgress
+                let title = isPerspectiveUploading ? "Uploading Perspective" : "Uploading Video"
+                let subtitle = "Please wait..."
+                
+                UploadProgressOverlay(
+                    progress: progress,
+                    title: title,
+                    subtitle: subtitle
+                )
+                .transition(.opacity)
+                .animation(.easeInOut(duration: 0.3), value: progress)
             }
         }
     }

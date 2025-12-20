@@ -3,7 +3,9 @@ import AVKit
 import FirebaseAuth
 import FirebaseFirestore
 import MapKit
+import PhotosUI
 import SwiftUI
+import UniformTypeIdentifiers
 
 // Update the constants to be more specific and avoid naming conflicts
 private enum MapViewConstants {
@@ -294,7 +296,11 @@ extension MapView {
 
       // Show upload progress indicator when uploading
       if viewModel.uploadProgress > 0 && viewModel.uploadProgress < 1.0 {
-        UploadProgressOverlay(viewModel: viewModel)
+        UploadProgressOverlay(
+          progress: viewModel.uploadProgress,
+          title: "Uploading Video",
+          subtitle: "Please wait..."
+        )
       }
 
       // Banner for location denial
@@ -325,9 +331,10 @@ extension MapView {
   }
 }
 
-class Coordinator: NSObject, MKMapViewDelegate {
+class Coordinator: NSObject, MKMapViewDelegate, PHPickerViewControllerDelegate {
   var parent: MapView
   var hasLoggedMapStatus = false
+  var pendingPerspectivePin: Pin?
 
   init(_ parent: MapView) {
     self.parent = parent
@@ -543,109 +550,226 @@ class Coordinator: NSObject, MKMapViewDelegate {
       return
     }
 
-    // Set current video ID for flagging reference
+    // Offer actions: watch video, add perspective, flag
+    Task { @MainActor in
+      await presentPinActions(pin: pin, on: mapView, sourceView: view)
+    }
+  }
+
+  // Present the legacy action sheet: watch, add perspective, flag
+  @MainActor
+  private func presentPinActions(pin: Pin, on mapView: MKMapView, sourceView: UIView) async {
     parent.viewModel.currentlyPlayingVideoId = pin.id
 
-    // Use the new refresh mechanism to handle video playback
-    Task { @MainActor in
-      do {
-        // First check premium access for this pin's video
-        let (canWatch, shouldPromptPremium, accessMessage) = await parent.viewModel.canWatchVideo(for: pin)
-        
-        if !canWatch {
-          // Show appropriate alert
-          if shouldPromptPremium {
-            // Show alert with options to purchase this zip code or upgrade to premium
-            let alert = UIAlertController(
-              title: "Video Locked",
-              message: accessMessage ?? "This video is in a different area",
-              preferredStyle: .alert
-            )
-            
-            // Option 1: Unlock this specific zip code
-            alert.addAction(UIAlertAction(title: "Unlock Zip \(pin.zipCode) ($0.99)", style: .default) { _ in
-              // Purchase this specific zip code
-              Task {
-                await PremiumManager.shared.purchaseZipCode(pin.zipCode)
-              }
-            })
-            
-            // Option 2: Upgrade to premium (unlimited)
-            alert.addAction(UIAlertAction(title: "Premium Unlimited ($4.99)", style: .default) { _ in
-              // Navigate to premium view
-              NotificationCenter.default.post(name: NSNotification.Name("ShowPremiumView"), object: nil)
-            })
-            
-            // Option 3: Cancel
-            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-            
-            if let topVC = getRootViewController() {
-              topVC.present(alert, animated: true)
-            }
-          } else {
-            parent.viewModel.showError(accessMessage ?? "Unable to play this video")
-          }
-          return
-        }
-        
-        // User can watch - proceed with playback
-        // First check if we need to refresh the pin data
-        if pin.videoURL.isEmpty {
-          #if DEBUG
-          print("[MapView] Pin has empty videoURL, attempting to refresh from Firestore")
-          #endif
-          if let refreshedPin = try await refreshPinFromFirestore(pinId: pin.id),
-            !refreshedPin.videoURL.isEmpty
-          {
-            // Update pin in viewModel to have the correct URL for future references
-            parent.viewModel.updatePinVideoURL(pin.id, newURL: refreshedPin.videoURL)
+    // Check if perspectives exist before showing the option
+    var hasPerspective = false
+    do {
+      let snapshot = try await Firestore.firestore()
+        .collection("witnessEvidence")
+        .whereField("pinId", isEqualTo: pin.id)
+        .limit(to: 1)
+        .getDocuments()
+      hasPerspective = snapshot.documents.isEmpty == false
+    } catch {
+      #if DEBUG
+      print("Perspective existence check failed: \(error)")
+      #endif
+    }
 
-            // Play the video with the refreshed URL
-            #if DEBUG
-            print("[MapView] Successfully refreshed pin with video URL: \(refreshedPin.videoURL)")
-            #endif
-            await dismissExistingPlayer(animated: true)
-            if let url = URL(string: refreshedPin.videoURL) {
-              await playVideo(from: url)
-            } else {
-              throw NSError(
-                domain: "VideoPlayback", code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Invalid video URL format after refresh."])
+    guard let topVC = getRootViewController() else { return }
+    let alert = UIAlertController(title: "Pin Options", message: nil, preferredStyle: .actionSheet)
+
+    alert.addAction(UIAlertAction(title: "Watch Video", style: .default) { [weak self] _ in
+      guard let self else { return }
+      Task { @MainActor in
+        await self.watchPinVideo(pin)
+      }
+    })
+
+    if hasPerspective {
+      alert.addAction(UIAlertAction(title: "Watch Perspective", style: .default) { [weak self] _ in
+        guard let self else { return }
+        Task { @MainActor in
+          await self.watchLatestPerspective(pin)
+        }
+      })
+    }
+
+    alert.addAction(UIAlertAction(title: "Add Perspective", style: .default) { [weak self] _ in
+      guard let self else { return }
+      self.startPerspectivePicker(for: pin, sourceView: sourceView)
+    })
+
+    alert.addAction(UIAlertAction(title: "Flag Video", style: .destructive) { [weak self] _ in
+      guard let self else { return }
+      self.parent.viewModel.currentlyPlayingVideoId = pin.id
+      self.parent.showingReportVideo = true
+    })
+
+    alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+
+    if let popover = alert.popoverPresentationController {
+      popover.sourceView = sourceView
+      popover.sourceRect = sourceView.bounds
+      popover.permittedArrowDirections = [.any]
+    }
+
+    topVC.present(alert, animated: true)
+  }
+
+  // Preserve existing playback path, now invoked from the action sheet
+  @MainActor
+  private func watchPinVideo(_ pin: Pin) async {
+    parent.viewModel.currentlyPlayingVideoId = pin.id
+
+    do {
+      let (canWatch, shouldPromptPremium, accessMessage) = await parent.viewModel.canWatchVideo(for: pin)
+
+      if !canWatch {
+        if shouldPromptPremium {
+          let alert = UIAlertController(
+            title: "Video Locked",
+            message: accessMessage ?? "This video is in a different area",
+            preferredStyle: .alert
+          )
+
+          alert.addAction(UIAlertAction(title: "Unlock Zip \(pin.zipCode) ($0.99)", style: .default) { _ in
+            Task {
+              await PremiumManager.shared.purchaseZipCode(pin.zipCode)
             }
-          } else {
-            // Check if this pin is currently uploading
-            if parent.viewModel.uploadProgress > 0 && parent.viewModel.uploadProgress < 1.0 {
-              throw NSError(
-                domain: "VideoPlayback", code: -2,
-                userInfo: [
-                  NSLocalizedDescriptionKey:
-                    "Video is still uploading. Please wait for upload to complete."
-                ])
-            } else {
-              throw NSError(
-                domain: "VideoPlayback", code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "This pin has no video attached."])
-            }
+          })
+
+          alert.addAction(UIAlertAction(title: "Premium Unlimited ($4.99)", style: .default) { _ in
+            NotificationCenter.default.post(name: NSNotification.Name("ShowPremiumView"), object: nil)
+          })
+
+          alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+
+          if let topVC = getRootViewController() {
+            topVC.present(alert, animated: true)
           }
         } else {
-          // We already have a video URL, proceed with normal playback
-          #if DEBUG
-          print("[MapView] Pin already has videoURL: \(pin.videoURL)")
-          #endif
+          parent.viewModel.showError(accessMessage ?? "Unable to play this video")
+        }
+        return
+      }
+
+      if pin.videoURL.isEmpty {
+        #if DEBUG
+        print("[MapView] Pin has empty videoURL, attempting to refresh from Firestore")
+        #endif
+        if let refreshedPin = try await refreshPinFromFirestore(pinId: pin.id),
+          !refreshedPin.videoURL.isEmpty
+        {
+          parent.viewModel.updatePinVideoURL(pin.id, newURL: refreshedPin.videoURL)
           await dismissExistingPlayer(animated: true)
-          if let url = URL(string: pin.videoURL) {
+          if let url = URL(string: refreshedPin.videoURL) {
             await playVideo(from: url)
           } else {
             throw NSError(
               domain: "VideoPlayback", code: -1,
-              userInfo: [NSLocalizedDescriptionKey: "Invalid video URL format."])
+              userInfo: [NSLocalizedDescriptionKey: "Invalid video URL format after refresh."])
           }
+        } else {
+          if parent.viewModel.uploadProgress > 0 && parent.viewModel.uploadProgress < 1.0 {
+            parent.viewModel.showError(
+              "Upload in progress (\(Int(parent.viewModel.uploadProgress * 100))%). Please wait.")
+          } else {
+            parent.viewModel.showError("Unable to play this video")
+          }
+          return
         }
-      } catch {
-        print("Error during video playback: \(error)")
-        parent.viewModel.showError("Failed to play video: \(error.localizedDescription)")
+      } else {
+        await dismissExistingPlayer(animated: true)
+        if let url = URL(string: pin.videoURL) {
+          await playVideo(from: url)
+        } else {
+          throw NSError(
+            domain: "VideoPlayback", code: -1,
+            userInfo: [NSLocalizedDescriptionKey: "Invalid video URL format."])
+        }
       }
+    } catch {
+      print("Error during video playback: \(error)")
+      parent.viewModel.showError("Failed to play video: \(error.localizedDescription)")
     }
+  }
+
+  @MainActor
+  private func watchLatestPerspective(_ pin: Pin) async {
+    parent.viewModel.currentlyPlayingVideoId = pin.id
+    do {
+      // Server-side order (requires composite index: pinId asc, submittedAt desc)
+      let snapshot = try await Firestore.firestore()
+        .collection("witnessEvidence")
+        .whereField("pinId", isEqualTo: pin.id)
+        .order(by: "submittedAt", descending: true)
+        .limit(to: 1)
+        .getDocuments()
+
+      guard let data = snapshot.documents.first?.data(),
+        let urlString = data["videoURL"] as? String,
+        !urlString.isEmpty
+      else {
+        parent.viewModel.showError("No perspectives available for this pin yet.")
+        return
+      }
+
+      await dismissExistingPlayer(animated: true)
+      if let url = URL(string: urlString) {
+        await playVideo(from: url)
+      } else {
+        parent.viewModel.showError("Invalid perspective video URL.")
+      }
+    } catch {
+      parent.viewModel.showError("Unable to load perspectives: \(error.localizedDescription)")
+    }
+  }
+
+  // Kick off PHPicker for perspective videos
+  private func startPerspectivePicker(for pin: Pin, sourceView: UIView) {
+    guard let topVC = topMostViewController() else {
+      print("[Perspective] Unable to find top view controller to present picker.")
+      return
+    }
+
+    var config = PHPickerConfiguration(photoLibrary: .shared())
+    config.filter = .videos
+    config.selectionLimit = 1
+    config.preferredAssetRepresentationMode = .current
+
+    pendingPerspectivePin = pin
+    let picker = PHPickerViewController(configuration: config)
+    picker.delegate = self
+    print("[Perspective] Presenting picker for pin \(pin.id)")
+
+    // If something is already presented, dismiss it first to avoid "presentation in progress"
+    if let presented = topVC.presentedViewController {
+      presented.dismiss(animated: true) {
+        self.presentPicker(picker, from: topVC, sourceView: sourceView)
+      }
+    } else {
+      presentPicker(picker, from: topVC, sourceView: sourceView)
+    }
+  }
+
+  private func presentPicker(_ picker: PHPickerViewController, from topVC: UIViewController, sourceView: UIView) {
+    if let popover = picker.popoverPresentationController {
+      popover.sourceView = sourceView
+      popover.sourceRect = sourceView.bounds
+      popover.permittedArrowDirections = [.any]
+    }
+
+    topVC.present(picker, animated: true)
+    print("[Perspective] Picker presented")
+  }
+
+  // Copy picked movie to a temp location we control
+  nonisolated func copyMovieToTemp(url: URL) throws -> URL {
+    let tempDir = FileManager.default.temporaryDirectory
+    let target = tempDir.appendingPathComponent(UUID().uuidString).appendingPathExtension("mp4")
+    try FileManager.default.copyItem(at: url, to: target)
+    return target
   }
 
   // Helper to dismiss existing player, ensuring completion

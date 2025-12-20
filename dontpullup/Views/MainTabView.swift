@@ -23,7 +23,7 @@ struct MainTabView: View {
     MapContentView()
       .environmentObject(mapViewModel)
       .preferredColorScheme(.dark)
-      .alert("Location Error", isPresented: $mapViewModel.showAlert) {
+      .alert(mapViewModel.alertTitle, isPresented: $mapViewModel.showAlert) {
         Button("OK", role: .cancel) {
           // Call alertDismissed when alert is dismissed
           mapViewModel.alertDismissed()

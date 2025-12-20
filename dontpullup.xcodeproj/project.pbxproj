@@ -31,7 +31,7 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		1E304A882ED8F51E000098AD /* Exceptions for "Dontpullup" folder in "Dontpullup" target */ = {
+		1EDDBB242EF5C24A009893F1 /* Exceptions for "Dontpullup" folder in "Dontpullup" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
@@ -44,7 +44,7 @@
 		1E0850F92DC7325B0060E683 /* Dontpullup */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
-				1E304A882ED8F51E000098AD /* Exceptions for "Dontpullup" folder in "Dontpullup" target */,
+				1EDDBB242EF5C24A009893F1 /* Exceptions for "Dontpullup" folder in "Dontpullup" target */,
 			);
 			path = Dontpullup;
 			sourceTree = "<group>";
@@ -172,8 +172,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				1E5F5B422EBAA0BA00A12E35 /* DeveloperNotes.md in Resources */,
-				1E5584B42ECA904E00F57F4B /* PrivacyInfo.xcprivacy in Resources */,
-				1E5585592ECA9AA500F57F4B /* PrivacyInfo 2.xcprivacy in Resources */,
 				1E55855C2ECA9AAC00F57F4B /* PLIST_PERMISSION_STRINGS.README.md in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

@@ -11,6 +11,21 @@ import Photos
 import SwiftUI
 @preconcurrency import UIKit
 
+/// Thread-safe flag to prevent continuation from being resumed multiple times
+private final class AtomicFlag: @unchecked Sendable {
+  private var _value: Bool = false
+  private let lock = NSLock()
+  
+  /// Attempts to set the flag to true. Returns true if successful (was false), false if already set.
+  func trySet() -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    if _value { return false }
+    _value = true
+    return true
+  }
+}
+
 enum MapDisplayStyle: String, CaseIterable, Identifiable {
   case explore
   case muted
@@ -134,6 +149,7 @@ class MapViewModel: NSObject, ObservableObject {
   @Published var showingIncidentPicker = false
   @Published var showingHelp = false
   @Published var showAlert = false
+  @Published var alertTitle = "Alert"
   @Published var alertMessage = ""
   @Published var isEditMode = false
   @Published var mapType: MKMapType = MapDisplayStyle.explore.mapType
@@ -152,6 +168,8 @@ class MapViewModel: NSObject, ObservableObject {
   @Published var preCompressedVideoURL: URL?
   private var preCompressionTask: Task<Void, Error>?
   @Published var uploadProgress: Double = 0
+  @Published var perspectiveUploadProgress: Double = 0
+  @Published var isUploadingPerspective: Bool = false
   @Published var reportStep: ReportStep?  // nil = no sheet
   @Published var reportDraft = PinDraft()  // holds coord/type/url
   @Published var isLimitedFunctionalityDueToLocationDenial: Bool = false
@@ -163,7 +181,7 @@ class MapViewModel: NSObject, ObservableObject {
   private var hasPromptedForInitialPermission = false
 
   // Alert queue to prevent multiple alerts
-  private var alertQueue: [String] = []
+  private var alertQueue: [(title: String, message: String)] = []
   private var isShowingAlert = false
 
   // Add AuthState
@@ -359,8 +377,9 @@ class MapViewModel: NSObject, ObservableObject {
   @MainActor
   func centerOnUserLocation() {
     guard let userLocation = userLocation else {
-      showAlert = true
+      alertTitle = "Location Error"
       alertMessage = "Unable to determine your location"
+      showAlert = true
       return
     }
 
@@ -528,8 +547,9 @@ class MapViewModel: NSObject, ObservableObject {
       return
     }
     guard let userLocation = userLocation else {
-      showAlert = true
+      alertTitle = "Location Error"
       alertMessage = "Unable to determine your location"
+      showAlert = true
       return
     }
     let pinLocation = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
@@ -538,8 +558,9 @@ class MapViewModel: NSObject, ObservableObject {
       pendingCoordinate = coordinate
       showingIncidentPicker = true
     } else {
-      showAlert = true
+      alertTitle = "Out of Range"
       alertMessage = "You can only drop pins within 200 feet of your location"
+      showAlert = true
     }
   }
 
@@ -565,11 +586,11 @@ class MapViewModel: NSObject, ObservableObject {
   }
 
   // MARK: - Alert handling
-  func showError(_ message: String) {
+  func showError(_ message: String, title: String = "Error") {
     Task { @MainActor in
       // Add message to queue and try to show after a brief delay
       // This prevents "presentation in progress" conflicts when sheets are dismissing
-      alertQueue.append(message)
+      alertQueue.append((title: title, message: message))
       
       // Small delay to allow any ongoing presentations/dismissals to complete
       try? await Task.sleep(nanoseconds: 300_000_000)  // 0.3 seconds
@@ -585,7 +606,9 @@ class MapViewModel: NSObject, ObservableObject {
     // Use DispatchQueue.main.async to defer the state update and avoid
     // "Publishing changes from within view updates" warning
     DispatchQueue.main.async {
-      self.alertMessage = self.alertQueue.removeFirst()
+      let alertItem = self.alertQueue.removeFirst()
+      self.alertTitle = alertItem.title
+      self.alertMessage = alertItem.message
       self.isShowingAlert = true
       self.showAlert = true
     }
@@ -1181,8 +1204,9 @@ class MapViewModel: NSObject, ObservableObject {
   @MainActor
   func centerMapOnUserLocation() {
     guard let userLocation = userLocation else {
-      showAlert = true
+      alertTitle = "Location Error"
       alertMessage = "Unable to determine your location"
+      showAlert = true
       return
     }
 
@@ -1196,9 +1220,10 @@ class MapViewModel: NSObject, ObservableObject {
 
   func continueWithLimitedFunctionality() {
     UserDefaults.standard.set(true, forKey: "userDeclinedLocationPermissions")
-    showAlert = true
+    alertTitle = "Limited Access"
     alertMessage =
       "Some features like pin dropping will be unavailable without location access. Enable it later in Settings."
+    showAlert = true
   }
 
   @objc private func refreshLocationPermissions() {
@@ -1418,6 +1443,8 @@ class MapViewModel: NSObject, ObservableObject {
           var progressHandle: String?
           var successHandle: String?
           var failureHandle: String?
+          // Thread-safe flag to ensure continuation is only resumed once
+          let hasResumed = AtomicFlag()
 
           // Monitor upload progress with throttled updates
           var lastProgressUpdate: TimeInterval = 0
@@ -1438,17 +1465,17 @@ class MapViewModel: NSObject, ObservableObject {
           }
 
           successHandle = uploadTask.observe(.success) { _ in
+            // Thread-safe guard against double resume
+            guard hasResumed.trySet() else { return }
+            
             #if DEBUG
             print("[MapViewModel] Upload task completed successfully")
             #endif
 
-            // Clean up observers
-            if let progressHandle = progressHandle {
-              uploadTask.removeObserver(withHandle: progressHandle)
-            }
-            if let failureHandle = failureHandle {
-              uploadTask.removeObserver(withHandle: failureHandle)
-            }
+            // Clean up all observers immediately
+            if let ph = progressHandle { uploadTask.removeObserver(withHandle: ph) }
+            if let sh = successHandle { uploadTask.removeObserver(withHandle: sh) }
+            if let fh = failureHandle { uploadTask.removeObserver(withHandle: fh) }
 
             // Get download URL after successful upload
             storageRef.downloadURL { url, error in
@@ -1572,20 +1599,17 @@ class MapViewModel: NSObject, ObservableObject {
           }
 
           failureHandle = uploadTask.observe(.failure) { snapshot in
+            // Thread-safe guard against double resume
+            guard hasResumed.trySet() else { return }
+            
             #if DEBUG
             print("[MapViewModel] Upload task failed")
             #endif
 
-            // Store the continuation locally to avoid using it in an async context
-            let localContinuation = continuation
-
-            // Clean up observers
-            if let progressHandle = progressHandle {
-              uploadTask.removeObserver(withHandle: progressHandle)
-            }
-            if let successHandle = successHandle {
-              uploadTask.removeObserver(withHandle: successHandle)
-            }
+            // Clean up all observers immediately
+            if let ph = progressHandle { uploadTask.removeObserver(withHandle: ph) }
+            if let sh = successHandle { uploadTask.removeObserver(withHandle: sh) }
+            if let fh = failureHandle { uploadTask.removeObserver(withHandle: fh) }
 
             // Remove the pin from local array since upload failed
             Task { @MainActor in
@@ -1598,12 +1622,12 @@ class MapViewModel: NSObject, ObservableObject {
               #if DEBUG
               print("[MapViewModel] Upload error: \(error.localizedDescription)")
               #endif
-              localContinuation.resume(throwing: error)
+              continuation.resume(throwing: error)
             } else {
               #if DEBUG
               print("[MapViewModel] Unknown upload error")
               #endif
-              localContinuation.resume(
+              continuation.resume(
                 throwing: NSError(
                   domain: "StorageError", code: -2,
                   userInfo: [NSLocalizedDescriptionKey: "Unknown upload error"]))
@@ -1760,8 +1784,9 @@ class MapViewModel: NSObject, ObservableObject {
   // Enhanced zoom to user location function
   func zoomToUserTight() {
     guard let userLocation = userLocation else {
-      showAlert = true
+      alertTitle = "Location Error"
       alertMessage = "Unable to determine your location"
+      showAlert = true
       return
     }
 
@@ -1793,8 +1818,9 @@ class MapViewModel: NSObject, ObservableObject {
   // Center button zoom function - 500 feet radius as requested
   func centerOnUserWith500FeetRadius() {
     guard let userLocation = userLocation else {
-      showAlert = true
+      alertTitle = "Location Error"
       alertMessage = "Unable to determine your location"
+      showAlert = true
       return
     }
 
@@ -2098,26 +2124,126 @@ class MapViewModel: NSObject, ObservableObject {
   }
 
   // MARK: - Video Metadata Validation
-
-  /// Returns true if the asset is ≤5h old and ≤200ft from the pin location
-  @MainActor
-  func checkVideoMetadata(asset: PHAsset, pinLocation: CLLocation) async -> Bool {
-    guard let creationDate = asset.creationDate,
-      let assetLocation = asset.location
-    else {
+  
+  /// Describes why a video failed validation
+  enum VideoValidationResult {
+    case valid
+    case tooOld(hoursOld: Int)
+    case tooFarAway(distanceFeet: Int)
+    case noLocationData
+    
+    var isValid: Bool {
+      if case .valid = self { return true }
       return false
     }
-    // Calculate age in hours
-    let hours =
-      Calendar.current
-      .dateComponents([.hour], from: creationDate, to: Date())
-      .hour ?? Int.max
-    // Calculate distance in feet
-    let feet = assetLocation.distance(from: pinLocation) * 3.28084
-    return hours <= 5 && feet <= 200
+    
+    /// User-friendly error message explaining the problem and how to fix it
+    var errorMessage: String {
+      switch self {
+      case .valid:
+        return ""
+      case .tooOld(let hours):
+        return "This video is \(hours) hours old.\n\nVideos must be recorded within the last 2 hours to ensure the footage is relevant and timely.\n\nTip: Record a new video at this location or choose a more recent video from your library."
+      case .tooFarAway(let feet):
+        return "This video was recorded \(feet) feet away from the pin location.\n\nVideos must be recorded within 500 feet of where you're dropping the pin.\n\nTip: Make sure you're uploading footage that was actually filmed at this location."
+      case .noLocationData:
+        return "This video doesn't have location data.\n\nWe need GPS information to verify the video was recorded near the pin location.\n\nTip: Enable Location Services for your Camera app in Settings, then record a new video."
+      }
+    }
+  }
+
+  /// Returns detailed validation result for the asset.
+  /// Checks if video is ≤2h old and within 500ft of the pin.
+  /// Falls back to live device location when GPS metadata is missing.
+  @MainActor
+  func checkVideoMetadata(asset: PHAsset, pinLocation: CLLocation) async -> Bool {
+    let result = await validateVideoMetadata(asset: asset, pinLocation: pinLocation)
+    return result.isValid
+  }
+  
+  /// Returns detailed validation result with specific failure reason
+  @MainActor
+  func validateVideoMetadata(asset: PHAsset, pinLocation: CLLocation) async -> VideoValidationResult {
+    // Check video age - must be within 2 hours
+    if let creationDate = asset.creationDate {
+      let hours = Calendar.current
+        .dateComponents([.hour], from: creationDate, to: Date())
+        .hour ?? Int.max
+
+      if hours > 2 {
+        #if DEBUG
+        print("[MapViewModel] Video rejected: \(hours)h old (max 2h).")
+        #endif
+        return .tooOld(hoursOld: hours)
+      }
+    }
+    
+    // Check proximity - must be within 500ft
+    return await validateVideoProximityDetailed(assetLocation: asset.location, pinLocation: pinLocation)
+  }
+
+  /// Validates proximity and returns detailed result
+  private func validateVideoProximityDetailed(
+    assetLocation: CLLocation?,
+    pinLocation: CLLocation
+  ) async -> VideoValidationResult {
+    if let assetLocation {
+      let feet = assetLocation.distance(from: pinLocation) * 3.28084
+      if feet <= 500 {
+        return .valid
+      } else {
+        #if DEBUG
+        print("[MapViewModel] Video rejected: \(Int(feet))ft away (max 500ft).")
+        #endif
+        return .tooFarAway(distanceFeet: Int(feet))
+      }
+    }
+
+    // Fallback to user's current location if video has no GPS
+    if let currentUserLocation = userLocation {
+      let feet = currentUserLocation.distance(from: pinLocation) * 3.28084
+      #if DEBUG
+      print("[MapViewModel] Asset missing GPS; using live location. Distance: \(feet)ft")
+      #endif
+      if feet <= 500 {
+        return .valid
+      } else {
+        return .tooFarAway(distanceFeet: Int(feet))
+      }
+    }
+
+    #if DEBUG
+    print("[MapViewModel] Video rejected: no GPS metadata and no live location available.")
+    #endif
+    return .noLocationData
   }
   
   // MARK: - Premium Video Access Check
+  
+  /// Ensures the playback gate uses the latest device ZIP by refreshing travel access on demand.
+  private func ensureZipAccessForPlayback(pinZip: String) async -> Bool {
+    guard !pinZip.isEmpty else { return true }
+
+    if zipAccessManager.hasAccess(to: pinZip) {
+      return true
+    }
+
+    if let currentLocation = userLocation ?? locationManager.location {
+      zipAccessManager.updateTravelAccess(with: currentLocation)
+
+      if zipAccessManager.hasAccess(to: pinZip) {
+        return true
+      }
+
+      if let resolvedZip = await getCurrentLocationZipCode(from: currentLocation),
+         resolvedZip.uppercased() == pinZip.uppercased() {
+        zipAccessManager.forceSetCurrentZip(resolvedZip)
+        return true
+      }
+    }
+
+    return false
+  }
   
   /// Checks if the current user can watch a video for a given pin
   /// Returns (canWatch: Bool, shouldPromptPremium: Bool, message: String?)
@@ -2147,7 +2273,7 @@ class MapViewModel: NSObject, ObservableObject {
       return (true, false, nil)
     }
 
-    if zipAccessManager.hasAccess(to: pin.zipCode) {
+    if await ensureZipAccessForPlayback(pinZip: pin.zipCode) {
       #if DEBUG
       print("[MapViewModel] Video access granted via ZipAccessManager for zip \(pin.zipCode)")
       #endif

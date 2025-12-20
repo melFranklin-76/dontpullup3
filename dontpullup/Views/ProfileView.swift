@@ -705,7 +705,8 @@ struct PremiumUpgradeView: View {
             #if targetEnvironment(simulator)
               // In simulator, always use the test flow regardless of products
               Task {
-                await premiumManager.simulatePurchaseForTesting()
+                // Simulate the full premium unlock in test mode
+                await premiumManager.simulatePurchaseForTesting(isPremiumUnlimited: true)
               }
             #else
               if premiumManager.products.isEmpty {

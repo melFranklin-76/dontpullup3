@@ -148,15 +148,79 @@ extension MapView {
 }
 
 // MARK: - Video Picking Implementation - Move to Coordinator class
-extension Coordinator: PHPickerViewControllerDelegate {
+extension Coordinator {
+  // Nonisolated helper to copy movies to a stable temp URL (usable from background callbacks)
+  nonisolated private func copyMovieToTempNonisolated(url: URL) throws -> URL {
+    let tempDir = FileManager.default.temporaryDirectory
+    let target = tempDir.appendingPathComponent(UUID().uuidString).appendingPathExtension("mp4")
+    try FileManager.default.copyItem(at: url, to: target)
+    return target
+  }
+
   func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
     // Dismiss picker immediately
     picker.dismiss(animated: true)
+    print("[Picker] didFinishPicking. results: \(results.count)")
+
+    // Perspective flow: handle witness upload first if a pin is pending.
+    if let perspectivePin = pendingPerspectivePin {
+      pendingPerspectivePin = nil
+
+      guard let provider = results.first?.itemProvider,
+        provider.hasItemConformingToTypeIdentifier(UTType.movie.identifier)
+      else {
+        Task { @MainActor in
+          parent.viewModel.showError("Please select a video.")
+        }
+        print("[Picker] Perspective flow missing movie provider.")
+        return
+      }
+
+      print("[Picker] Loading movie for perspective pin \(perspectivePin.id)")
+      provider.loadFileRepresentation(forTypeIdentifier: UTType.movie.identifier) { [weak self] url, error in
+        guard let self else { return }
+
+        if let error {
+          print("[Picker] loadFileRepresentation error: \(error.localizedDescription)")
+          Task { @MainActor in
+            self.parent.viewModel.showError("Unable to load video: \(error.localizedDescription)")
+          }
+          return
+        }
+
+        guard let fileURL = url else {
+          print("[Picker] No URL returned from loadFileRepresentation")
+          Task { @MainActor in
+            self.parent.viewModel.showError("No video URL returned.")
+          }
+          return
+        }
+
+        do {
+          let tempURL = try self.copyMovieToTempNonisolated(url: fileURL)
+          Task { @MainActor in
+            print("[Picker] Prepared temp URL for perspective: \(tempURL.lastPathComponent)")
+            await self.parent.viewModel.uploadPerspective(for: perspectivePin, videoURL: tempURL)
+            try? FileManager.default.removeItem(at: tempURL)
+          }
+        } catch {
+          print("[Picker] copyMovieToTemp failed: \(error.localizedDescription)")
+          Task { @MainActor in
+            self.parent.viewModel.showError("Failed to prepare video: \(error.localizedDescription)")
+          }
+        }
+      }
+      return
+    }
 
     // Handle video selection
     guard let result = results.first else {
       // User canceled selection, abort the flow
       parent.viewModel.reportStep = nil
+      Task { @MainActor in
+        parent.viewModel.showError("No video selected.")
+      }
+      print("[Picker] No results; user likely cancelled.")
       return
     }
 
@@ -167,6 +231,7 @@ extension Coordinator: PHPickerViewControllerDelegate {
       Task { @MainActor in
         self.parent.viewModel.showError("Could not load video metadata.")
       }
+      print("[Picker] Could not load PHAsset for selected video.")
       return
     }
 
@@ -174,14 +239,16 @@ extension Coordinator: PHPickerViewControllerDelegate {
     let pinLocation = CLLocation(latitude: draftCoord.latitude, longitude: draftCoord.longitude)
 
     Task { @MainActor in
-      let isValid = await self.parent.viewModel.checkVideoMetadata(
+      let validationResult = await self.parent.viewModel.validateVideoMetadata(
         asset: asset,
         pinLocation: pinLocation
       )
 
-      guard isValid else {
+      guard validationResult.isValid else {
+        // Show specific error message explaining the problem and how to fix it
         self.parent.viewModel.showError(
-          "Video must be ≤5 hours old and ≤200 ft from the pin location."
+          validationResult.errorMessage,
+          title: "Video Not Accepted"
         )
         return
       }
@@ -190,6 +257,13 @@ extension Coordinator: PHPickerViewControllerDelegate {
       // Get the video URL from the result
       result.itemProvider.loadFileRepresentation(forTypeIdentifier: UTType.movie.identifier) {
         url, error in
+        if let error {
+          print("[Picker] Pin flow loadFileRepresentation error: \(error.localizedDescription)")
+        }
+        #if DEBUG
+        if let url { print("[Picker] Pin flow got file URL: \(url.lastPathComponent)") }
+        #endif
+
         guard let url = url else {
           Task { @MainActor in
             self.parent.viewModel.showError("Could not load video")
@@ -200,7 +274,13 @@ extension Coordinator: PHPickerViewControllerDelegate {
         // Check video duration (limit to 3 minutes)
         Task {
           do {
-            let asset = AVAsset(url: url)
+            // Copy to our own temp location to keep the file available during upload
+            let tempURL = try self.copyMovieToTempNonisolated(url: url)
+            #if DEBUG
+            print("[Picker] Pin flow temp copy: \(tempURL.lastPathComponent)")
+            #endif
+            
+            let asset = AVAsset(url: tempURL)
             // Get video duration using modern API
             var duration: CMTime = .zero
 
@@ -234,16 +314,21 @@ extension Coordinator: PHPickerViewControllerDelegate {
             // Check if video is too long
             let maxDurationInSeconds: Double = 180  // 3 minutes
             if duration.seconds > maxDurationInSeconds {
+              let minutes = Int(duration.seconds / 60)
+              let seconds = Int(duration.seconds) % 60
               print("[SimplifiedReportFlow] Video too long: \(duration.seconds) seconds")
               await MainActor.run {
-                self.parent.viewModel.showError("Video must be under 3 minutes")
+                self.parent.viewModel.showError(
+                  "This video is \(minutes):\(String(format: "%02d", seconds)) long.\n\nVideos must be 3 minutes or less to keep reports concise and ensure quick uploads.\n\nTip: Trim your video in the Photos app before selecting it, or record a shorter clip.",
+                  title: "Video Too Long"
+                )
               }
               return
             }
 
             // Video is acceptable
             await MainActor.run {
-              self.parent.viewModel.reportDraft.videoURL = url
+              self.parent.viewModel.reportDraft.videoURL = tempURL
               Task {
                 await self.parent.viewModel.upload(draft: self.parent.viewModel.reportDraft)
               }

@@ -113,7 +113,8 @@ struct VideoPicker: UIViewControllerRepresentable {
   let viewModel: MapViewModel
 
   func makeUIViewController(context: Context) -> PHPickerViewController {
-    var config = PHPickerConfiguration()
+    // Use photoLibrary configuration to enable assetIdentifier access for metadata validation
+    var config = PHPickerConfiguration(photoLibrary: .shared())
     config.selectionLimit = 1
     config.filter = .videos
 
@@ -130,9 +131,16 @@ struct VideoPicker: UIViewControllerRepresentable {
 
   class Coordinator: NSObject, PHPickerViewControllerDelegate {
     let parent: VideoPicker
+    private let tempDir = FileManager.default.temporaryDirectory
 
     init(_ parent: VideoPicker) {
       self.parent = parent
+    }
+
+    private func copyMovieToTemp(url: URL) throws -> URL {
+      let target = tempDir.appendingPathComponent(UUID().uuidString).appendingPathExtension("mp4")
+      try FileManager.default.copyItem(at: url, to: target)
+      return target
     }
 
     func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
@@ -146,38 +154,80 @@ struct VideoPicker: UIViewControllerRepresentable {
         return
       }
 
-      // Check video metadata first
-      guard let assetId = result.assetIdentifier,
-        let asset = PHAsset.fetchAssets(withLocalIdentifiers: [assetId], options: nil).firstObject
-      else {
-        DispatchQueue.main.async {
-          self.parent.viewModel.showError("Could not load video metadata.")
-        }
-        return
+      // Check video metadata first (if available)
+      // Note: assetIdentifier requires PHPickerConfiguration(photoLibrary:) to be non-nil
+      let assetId = result.assetIdentifier
+      let asset: PHAsset? = assetId.flatMap {
+        PHAsset.fetchAssets(withLocalIdentifiers: [$0], options: nil).firstObject
       }
+      
+      #if DEBUG
+      print("[VideoPicker] assetIdentifier: \(assetId ?? "nil"), asset: \(asset != nil ? "found" : "nil")")
+      #endif
 
       let coord = self.parent.viewModel.reportDraft.coordinate
       let pinLocation = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
 
       Task { @MainActor in
-        let valid = await self.parent.viewModel.checkVideoMetadata(
-          asset: asset,
-          pinLocation: pinLocation
-        )
+        // Only validate metadata if we have asset access; otherwise allow upload
+        // (the user must still be within 200ft of the pin to drop it)
+        if let asset = asset {
+          let validationResult = await self.parent.viewModel.validateVideoMetadata(
+            asset: asset,
+            pinLocation: pinLocation
+          )
 
-        guard valid else {
-          self.parent.viewModel.showError("Video must be ≤5h old and ≤200 ft away.")
-          return
+          guard validationResult.isValid else {
+            // Show specific error message explaining the problem and how to fix it
+            self.parent.viewModel.showError(validationResult.errorMessage, title: "Video Not Accepted")
+            self.parent.onVideoPicked(nil)  // Properly dismiss the flow
+            return
+          }
+        } else {
+          #if DEBUG
+          print("[VideoPicker] No asset metadata available - skipping validation, proceeding with upload")
+          #endif
         }
 
         // Metadata OK—load file and call parent handler
+        #if DEBUG
+        print("[VideoPicker] Loading file representation for video...")
+        #endif
+        
         result.itemProvider.loadFileRepresentation(forTypeIdentifier: UTType.movie.identifier) {
-          url, _ in
+          url, error in
+          if let error {
+            print("[VideoPicker] loadFileRepresentation error: \(error.localizedDescription)")
+            DispatchQueue.main.async {
+              self.parent.viewModel.showError("Failed to load video: \(error.localizedDescription)")
+              self.parent.onVideoPicked(nil)
+            }
+            return
+          }
+
+          // Copy into our own temp file so it survives during upload
           if let url = url {
+            #if DEBUG
+            print("[VideoPicker] Got video URL: \(url.lastPathComponent)")
+            #endif
+            let tempURL: URL
+            do {
+              tempURL = try self.copyMovieToTemp(url: url)
+              #if DEBUG
+              print("[VideoPicker] Temp copy: \(tempURL.lastPathComponent)")
+              #endif
+            } catch {
+              DispatchQueue.main.async {
+                self.parent.viewModel.showError("Failed to prepare video: \(error.localizedDescription)")
+                self.parent.onVideoPicked(nil)
+              }
+              return
+            }
+
             // Check video duration (limit to 3 minutes)
             Task {
               do {
-                let asset = AVAsset(url: url)
+                let asset = AVAsset(url: tempURL)
                 // Get video duration using modern API
                 var duration: CMTime = .zero
 
@@ -211,9 +261,14 @@ struct VideoPicker: UIViewControllerRepresentable {
                 // Check if video is too long
                 let maxDurationInSeconds: Double = 180  // 3 minutes
                 if duration.seconds > maxDurationInSeconds {
+                  let minutes = Int(duration.seconds / 60)
+                  let seconds = Int(duration.seconds) % 60
                   print("[VideoPicker] Video too long: \(duration.seconds) seconds")
                   await MainActor.run {
-                    self.parent.viewModel.showError("Video must be under 3 minutes")
+                    self.parent.viewModel.showError(
+                      "This video is \(minutes):\(String(format: "%02d", seconds)) long.\n\nVideos must be 3 minutes or less to keep reports concise and ensure quick uploads.\n\nTip: Trim your video in the Photos app before selecting it, or record a shorter clip.",
+                      title: "Video Too Long"
+                    )
                     self.parent.onVideoPicked(nil)
                   }
                   return
@@ -221,7 +276,7 @@ struct VideoPicker: UIViewControllerRepresentable {
 
                 // Video is acceptable
                 await MainActor.run {
-                  self.parent.onVideoPicked(url)
+                  self.parent.onVideoPicked(tempURL)
                 }
               } catch {
                 print("[VideoPicker] Error checking video duration: \(error)")
