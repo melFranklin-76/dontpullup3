@@ -36,6 +36,9 @@ class NotificationManager: ObservableObject {
     }
     
     deinit {
+        // Cancel Combine subscriptions and remove observers to avoid leaks
+        cancellables.forEach { $0.cancel() }
+        cancellables.removeAll()
         NotificationCenter.default.removeObserver(self, name: .zipAccessStateDidChange, object: nil)
     }
     
