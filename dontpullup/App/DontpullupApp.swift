@@ -1,12 +1,10 @@
 import SwiftUI
 import FirebaseCore
+import MapKit
 
-private let firebaseBootstrap: Void = {
-    if FirebaseApp.app() == nil {
-        FirebaseApp.configure()
-        print("[FirebaseBootstrap] Firebase configured before SwiftUI launches")
-    }
-}()
+extension Notification.Name {
+    static let openMapAtCoordinate = Notification.Name("OpenMapAtCoordinate")
+}
 
 @main
 struct DontpullupApp: App {
@@ -15,9 +13,12 @@ struct DontpullupApp: App {
     @StateObject private var authState: AuthState
     
     init() {
-        _ = firebaseBootstrap
+        // Firebase is now configured in AppDelegate.didFinishLaunchingWithOptions
+        // before any Firebase services are accessed
         self._authState = StateObject(wrappedValue: AuthState.shared)
+        #if DEBUG
         print("[DontpullupApp] Initializer finished.")
+        #endif
     }
     
     var body: some Scene {
@@ -25,6 +26,32 @@ struct DontpullupApp: App {
             RootView()
                 .environmentObject(networkMonitor)
                 .environmentObject(authState)
+                .onOpenURL { url in
+                    #if DEBUG
+                    print("[DeepLink] Received URL: \(url.absoluteString)")
+                    print("[DeepLink] Scheme: \(url.scheme ?? "nil"), Host: \(url.host ?? "nil"), Path: \(url.path)")
+                    #endif
+                    Task {
+                        if let parsed = await MapLinkRouter.parse(url) {
+                            #if DEBUG
+                            print("[DeepLink] Successfully parsed location: \(parsed.coordinate), source: \(parsed.source)")
+                            #endif
+                            NotificationCenter.default.post(
+                                name: .openMapAtCoordinate,
+                                object: nil,
+                                userInfo: [
+                                    "lat": parsed.coordinate.latitude,
+                                    "lon": parsed.coordinate.longitude,
+                                    "source": parsed.source
+                                ]
+                            )
+                        } else {
+                            #if DEBUG
+                            print("[DeepLink] Failed to parse URL: \(url.absoluteString)")
+                            #endif
+                        }
+                    }
+                }
         }
     }
 }

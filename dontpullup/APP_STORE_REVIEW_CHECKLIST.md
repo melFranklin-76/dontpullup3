@@ -5,7 +5,7 @@
 ### **✅ 1. App Information & Metadata**
 - [x] **App Name**: "Don't Pull Up" 
 - [x] **Bundle ID**: `com.dontpullup`
-- [x] **Version**: 1.0 (build 1)
+- [x] **Version**: 4.0 (build 01)
 - [x] **Age Rating**: Recommend **17+** due to:
   - User-generated content (videos)
   - Incident reporting (potentially mature themes)
@@ -105,7 +105,7 @@ This app helps communities stay informed about local incidents through user-repo
 
 TEST ACCOUNT:
 Email: reviewer@dontpullup.com
-Password: [Provide test password]
+Password: PassWord1*
 
 KEY TESTING POINTS:
 1. Location permission is required for core functionality
@@ -113,20 +113,22 @@ KEY TESTING POINTS:
 3. Guest users have limited functionality (view-only)
 4. Premium features unlock cross-zip code viewing
 5. All video uploads are validated for time (≤5 hours) and location (≤200 feet)
+6. Full-screen required: Map/camera/video flows are designed for a single uninterrupted canvas; split view/slide over may break overlays and pin-drop/upload prompts.
 
 The app includes comprehensive privacy policy and terms of service accessible from the settings menu. Users are clearly informed of their responsibility for content they upload.
 ```
 
 ## ⚠️ **Final Checks Before Submission**
 
-- [ ] **Build Type**: Release/Production build
-- [ ] **Firebase Environment**: Production database and storage
-- [ ] **Test on Multiple Devices**: iPhone SE, iPhone 14, iPhone 15 Pro
-- [ ] **Network Conditions**: Test on WiFi and cellular
-- [ ] **Clean Install**: Test fresh installation experience
-- [ ] **All Features Working**: Complete functionality test
-- [ ] **No Debug Code**: Remove all debug prints and test code
-- [ ] **Screenshots Current**: Reflect actual app appearance
+- [x] **Build Type**: Release/Production build (ready for archive)
+- [x] **Firebase Environment**: Production database and storage (PROJECT_ID: ongrandma1)
+- [x] **Version/Build**: 4.0 (01) - confirmed in Info.plist
+- [ ] **Test on Multiple Devices**: iPhone SE, iPhone 14, iPhone 15 Pro (manual testing required)
+- [ ] **Network Conditions**: Test on WiFi and cellular (manual testing required)
+- [ ] **Clean Install**: Test fresh installation experience (manual testing required)
+- [ ] **All Features Working**: Complete functionality test (manual testing required)
+- [x] **No Debug Code**: Debug prints wrapped in #if DEBUG guards
+- [ ] **Screenshots Current**: Reflect actual app appearance (manual capture required)
 
 ## 🎯 **Expected Timeline**
 - **Standard Review**: 24-48 hours
